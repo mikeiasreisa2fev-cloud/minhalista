@@ -7,118 +7,125 @@ from concurrent.futures import ThreadPoolExecutor
 
 app = Flask(__name__)
 
-@app.route('/')
-def home():
-    return jsonify({"status": "online", "message": "API Ycine Ativa"})
+# Configurações de Conexão para simular um navegador real e evitar bloqueios
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Referer': 'https://app.pobreflix2.site/'
+}
 
-def fetch_page(session, url, serv_label, serv_id):
-    canais_da_pagina = []
-    try:
-        # Tenta até 2 vezes se falhar a requisição
-        for _ in range(2):
-            try:
-                r = session.get(url, timeout=20)
-                if r.status_code == 200:
-                    break
-                time.sleep(1)
-            except:
-                time.sleep(1)
-                continue
-        else:
-            return []
+def get_session():
+    s = requests.Session()
+    s.headers.update(HEADERS)
+    return s
 
-        soup = BeautifulSoup(r.text, 'html.parser')
-        # Itens que não são canais e devem ser ignorados
-        menu_items = ['início', 'filmes', 'séries', 'minha conta', 'sair', 'contato', 'termos', 'editar conta']
+# Função principal de extração de dados do HTML
+def extract_from_html(html, serv_id, serv_label):
+    found = []
+    soup = BeautifulSoup(html, 'html.parser')
+    menu_blacklist = ['início', 'filmes', 'séries', 'canais', 'buscar', 'minha conta', 'sair', 'contato', 'termos', 'editar']
 
-        for a in soup.find_all('a', href=True):
-            href = a['href']
+    # Busca em qualquer tag que possa conter links (Deep Crawl)
+    for el in soup.find_all(['a', 'div', 'li', 'span']):
+        href = el.get('href') or el.get('data-href') or el.get('data-link') or el.get('data-url')
+        if not href: continue
+
+        # Identifica links de reprodução de canais
+        if '/canais/' in href or '/play/' in href:
+            if any(x in href for x in ['/categorias', '?s=', 'page=']): continue
+
+            nome = el.get_text(strip=True)
+            logo = ""
+            img = el.find('img')
+            if img:
+                logo = img.get('src') or img.get('data-src') or ""
+                if not nome:
+                    nome = img.get('alt') or img.get('title') or ""
+
+            if not nome or any(m == nome.lower() for m in menu_blacklist): continue
+
+            # Limpa e normaliza a URL do canal
+            clean_href = href.split('?')[0].split('#')[0]
+            full_url = clean_href if clean_href.startswith('http') else f"https://app.pobreflix2.site{clean_href}"
             
-            # Captura canais e ignora categorias/paginação no link
-            if '/canais/' in href or '/play/' in href:
-                if any(x in href for x in ['/categorias', '/categoria', '?s=', 'page=']):
-                    continue
+            # Adiciona os parâmetros necessários para o player funcionar no servidor correto
+            full_url += f"?thema=1&server={serv_id}"
 
-                nome = a.get_text(strip=True)
-                logo = ""
-                img = a.find('img')
-                if img:
-                    logo = img.get('src') or img.get('data-src') or ""
-                    if not nome:
-                        nome = img.get('alt') or img.get('title') or ""
+            found.append({
+                "nome": f"{nome} ({serv_label})",
+                "url": full_url,
+                "logo": logo,
+                "chave": f"{serv_id}-{clean_href}"
+            })
+    return found
 
-                # Valida se o nome é útil
-                if not nome or any(menu == nome.lower() for menu in menu_items):
-                    continue
-
-                # Normaliza a URL para o player
-                full_url = href if href.startswith('http') else f"https://app.pobreflix2.site{href}"
-                
-                # Garante parâmetros de servidor e tema na URL
-                if 'server=' not in full_url:
-                    sep = '&' if '?' in full_url else '?'
-                    full_url = f"{full_url}{sep}server={serv_id}&thema=1"
-                elif 'thema=' not in full_url:
-                    full_url = f"{full_url}&thema=1"
-
-                canais_da_pagina.append({
-                    "nome": f"{nome} ({serv_label})",
-                    "url": full_url,
-                    "logo": logo,
-                    "chave": f"{serv_id}-{href.split('?')[0]}" # Chave única para evitar duplicados
-                })
+# Worker para processamento paralelo das URLs
+def fetch_worker(url, serv_id, serv_label):
+    try:
+        s = get_session()
+        r = s.get(url, timeout=20)
+        if r.status_code == 200:
+            return extract_from_html(r.text, serv_id, serv_label)
     except:
         pass
-    return canais_da_pagina
+    return []
+
+@app.route('/')
+def index():
+    return jsonify({"status": "ready", "module": "Ycine Scraper Ultra"})
 
 @app.route('/canais')
-def get_canais():
+def canais_m3u():
     try:
-        # Limites aumentados para capturar centenas de canais
         servidores = [
-            {"id": "speed-1", "label": "S1", "pages": 35},
-            {"id": "speed-2", "label": "S2", "pages": 40},
-            {"id": "speed-3", "label": "S3", "pages": 30}
+            {"id": "speed-1", "label": "S1"},
+            {"id": "speed-2", "label": "S2"},
+            {"id": "speed-3", "label": "S3"}
         ]
 
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Referer': 'https://app.pobreflix2.site/',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8'
-        }
+        urls_to_scan = []
+        # 1. Varredura por Páginas (Aumentado para 50 páginas por servidor)
+        for serv in servidores:
+            for p in range(1, 51):
+                urls_to_scan.append((f"https://app.pobreflix2.site/canais?page={p}&thema=1&server={serv['id']}", serv['id'], serv['label']))
 
-        session = requests.Session()
-        session.headers.update(headers)
+        # 2. Varredura por Categorias Comuns (Deep Scan)
+        cats = ['abertos', 'esportes', 'filmes-e-series', 'documentarios', 'infantil', 'variedades', 'noticias', 'religiosos']
+        for serv in servidores:
+            for cat in cats:
+                for p in range(1, 10):
+                    urls_to_scan.append((f"https://app.pobreflix2.site/canais/categoria/{cat}?page={p}&thema=1&server={serv['id']}", serv['id'], serv['label']))
 
-        all_tasks = []
-        # Processamento paralelo com 20 threads para carregar todas as páginas rapidamente
-        with ThreadPoolExecutor(max_workers=20) as executor:
-            for serv in servidores:
-                for page in range(1, serv['pages'] + 1):
-                    url = f"https://app.pobreflix2.site/canais?page={page}&thema=1&server={serv['id']}"
-                    all_tasks.append(executor.submit(fetch_page, session, url, serv['label'], serv['id']))
+        # Execução Multi-Thread de alta velocidade (30 workers)
+        all_channels = []
+        with ThreadPoolExecutor(max_workers=30) as executor:
+            futures = [executor.submit(fetch_worker, u, sid, sl) for u, sid, sl in urls_to_scan]
+            for f in futures:
+                all_channels.extend(f.result())
 
+        # Consolidação e geração da Lista M3U
         links_vistos = set()
-        m3u_content = "#EXTM3U\n"
-        
+        m3u = "#EXTM3U\n"
         count = 0
-        for task in all_tasks:
-            result = task.result()
-            for canal in result:
-                if canal['chave'] not in links_vistos:
-                    links_vistos.add(canal['chave'])
-                    logo_attr = f' tvg-logo="{canal["logo"]}"' if canal["logo"] else ""
-                    m3u_content += f'#EXTINF:-1{logo_attr} group-title="Ycine TV LIVE",{canal["nome"]}\n{canal["url"]}\n'
-                    count += 1
+        
+        # Ordenação alfabética
+        all_channels.sort(key=lambda x: x['nome'])
 
-        # Contador no final para conferência
-        m3u_content += f"\n# TOTAL DE CANAIS CAPTURADOS: {count}\n"
+        for c in all_channels:
+            if c['chave'] not in links_vistos:
+                links_vistos.add(c['chave'])
+                logo = f' tvg-logo="{c["logo"]}"' if c["logo"] else ""
+                m3u += f'#EXTINF:-1{logo} group-title="Ycine TV LIVE",{c["nome"]}\n{c["url"]}\n'
+                count += 1
 
-        return Response(m3u_content, mimetype='text/plain')
+        # Contador de verificação no final da lista
+        m3u += f"\n# TOTAL CAPTURADO: {count}\n"
+        return Response(m3u, mimetype='text/plain')
 
     except Exception as e:
-        return f"Erro ao gerar lista: {str(e)}", 500
+        return f"Erro Crítico: {str(e)}", 500
 
 if __name__ == "__main__":
+    # O Railway usa a porta fornecida pela variável de ambiente PORT
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
