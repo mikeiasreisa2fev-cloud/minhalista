@@ -2,134 +2,123 @@ from flask import Flask, jsonify, Response
 import os
 import requests
 from bs4 import BeautifulSoup
-from concurrent.futures import ThreadPoolExecutor
 import time
-import re
+from concurrent.futures import ThreadPoolExecutor
 
 app = Flask(__name__)
 
-# URL e Headers para simular um celular Android real
-BASE_URL = "https://app.pobreflix2.site"
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-    'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
-    'Connection': 'keep-alive',
-    'Referer': BASE_URL
-}
-
-def get_session():
-    session = requests.Session()
-    session.headers.update(HEADERS)
-    # Visita a home primeiro para obter cookies de sessão e parecer um acesso humano
-    try:
-        session.get(BASE_URL, timeout=10)
-    except:
-        pass
-    return session
-
-def scrape_worker(url, serv_id, serv_label, category):
-    found = []
-    try:
-        session = get_session()
-        r = session.get(url, timeout=25)
-        if r.status_code != 200: return []
-
-        # Busca por IDs de canais via Regex (mais robusto que depender apenas do BeautifulSoup)
-        # Procura o padrão: /canais/12345 ou /play/12345
-        html = r.text
-        links = re.findall(r'href=["\'](/?canais/\d+|/?play/\d+)["\']', html)
-
-        # Para cada link encontrado, extraímos o nome e o logotipo de forma cirúrgica
-        soup = BeautifulSoup(html, 'html.parser')
-
-        for link in set(links):
-            # Procura o elemento <a> exato que contém esse link
-            a = soup.find('a', href=re.compile(re.escape(link)))
-            if not a: continue
-
-            nome = a.get_text(strip=True)
-            logo = ""
-            img = a.find('img')
-            if img:
-                logo = img.get('src') or img.get('data-src') or ""
-                if not nome:
-                    nome = img.get('alt') or img.get('title') or ""
-
-            # Filtros de validação
-            if not nome or len(nome) < 2: continue
-            if any(m in nome.lower() for m in ['início', 'minha conta', 'sair', 'contato', 'buscar', 'filtros']):
-                continue
-
-            # Formata o caminho e a URL final
-            clean_path = link if link.startswith('/') else f"/{link}"
-            final_url = f"{BASE_URL}{clean_path}?thema=1&server={serv_id}"
-
-            found.append({
-                "nome": f"{nome} ({serv_label})",
-                "url": final_url,
-                "logo": logo,
-                "cat": category,
-                "key": f"{serv_id}-{clean_path}"
-            })
-    except:
-        pass
-    return found
-
 @app.route('/')
 def home():
-    return "API YCINE MASTER V4 - ONLINE"
+    return jsonify({"status": "online", "message": "API Ycine Ativa"})
+
+def fetch_page(session, url, serv_label, serv_id):
+    canais_da_pagina = []
+    try:
+        # Tenta até 2 vezes se falhar a requisição
+        for _ in range(2):
+            try:
+                r = session.get(url, timeout=20)
+                if r.status_code == 200:
+                    break
+                time.sleep(1)
+            except:
+                time.sleep(1)
+                continue
+        else:
+            return []
+
+        soup = BeautifulSoup(r.text, 'html.parser')
+        # Itens que não são canais e devem ser ignorados
+        menu_items = ['início', 'filmes', 'séries', 'minha conta', 'sair', 'contato', 'termos', 'editar conta']
+
+        for a in soup.find_all('a', href=True):
+            href = a['href']
+            
+            # Captura canais e ignora categorias/paginação no link
+            if '/canais/' in href or '/play/' in href:
+                if any(x in href for x in ['/categorias', '/categoria', '?s=', 'page=']):
+                    continue
+
+                nome = a.get_text(strip=True)
+                logo = ""
+                img = a.find('img')
+                if img:
+                    logo = img.get('src') or img.get('data-src') or ""
+                    if not nome:
+                        nome = img.get('alt') or img.get('title') or ""
+
+                # Valida se o nome é útil
+                if not nome or any(menu == nome.lower() for menu in menu_items):
+                    continue
+
+                # Normaliza a URL para o player
+                full_url = href if href.startswith('http') else f"https://app.pobreflix2.site{href}"
+                
+                # Garante parâmetros de servidor e tema na URL
+                if 'server=' not in full_url:
+                    sep = '&' if '?' in full_url else '?'
+                    full_url = f"{full_url}{sep}server={serv_id}&thema=1"
+                elif 'thema=' not in full_url:
+                    full_url = f"{full_url}&thema=1"
+
+                canais_da_pagina.append({
+                    "nome": f"{nome} ({serv_label})",
+                    "url": full_url,
+                    "logo": logo,
+                    "chave": f"{serv_id}-{href.split('?')[0]}" # Chave única para evitar duplicados
+                })
+    except:
+        pass
+    return canais_da_pagina
 
 @app.route('/canais')
-def generate_m3u():
+def get_canais():
     try:
+        # Limites aumentados para capturar centenas de canais
         servidores = [
-            {"id": "speed-1", "label": "S1"},
-            {"id": "speed-2", "label": "S2"},
-            {"id": "speed-3", "label": "S3"}
+            {"id": "speed-1", "label": "S1", "pages": 35},
+            {"id": "speed-2", "label": "S2", "pages": 40},
+            {"id": "speed-3", "label": "S3", "pages": 30}
         ]
 
-        tasks = []
-        for serv in servidores:
-            # Escaneia 15 páginas da lista geral por servidor
-            for p in range(1, 16):
-                url = f"{BASE_URL}/canais?page={p}&thema=1&server={serv['id']}"
-                tasks.append((url, serv['id'], serv['label'], "Canais TV"))
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Referer': 'https://app.pobreflix2.site/',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8'
+        }
 
-        # Execução multi-tarefa com apenas 4 workers (velocidade segura contra bloqueio de IP)
-        all_data = []
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            futures = [executor.submit(scrape_worker, *t) for t in tasks]
-            for f in futures:
-                all_data.extend(f.result())
+        session = requests.Session()
+        session.headers.update(headers)
 
-        seen = set()
-        m3u = "#EXTM3U\n"
+        all_tasks = []
+        # Processamento paralelo com 20 threads para carregar todas as páginas rapidamente
+        with ThreadPoolExecutor(max_workers=20) as executor:
+            for serv in servidores:
+                for page in range(1, serv['pages'] + 1):
+                    url = f"https://app.pobreflix2.site/canais?page={page}&thema=1&server={serv['id']}"
+                    all_tasks.append(executor.submit(fetch_page, session, url, serv['label'], serv['id']))
+
+        links_vistos = set()
+        m3u_content = "#EXTM3U\n"
+        
         count = 0
+        for task in all_tasks:
+            result = task.result()
+            for canal in result:
+                if canal['chave'] not in links_vistos:
+                    links_vistos.add(canal['chave'])
+                    logo_attr = f' tvg-logo="{canal["logo"]}"' if canal["logo"] else ""
+                    m3u_content += f'#EXTINF:-1{logo_attr} group-title="Ycine TV LIVE",{canal["nome"]}\n{canal["url"]}\n'
+                    count += 1
 
-        # Ordenação alfabética dos canais
-        all_data.sort(key=lambda x: x['nome'])
+        # Contador no final para conferência
+        m3u_content += f"\n# TOTAL DE CANAIS CAPTURADOS: {count}\n"
 
-        for c in all_data:
-            if c['key'] not in seen:
-                seen.add(c['key'])
-                logo = f' tvg-logo="{c["logo"]}"' if c["logo"] else ""
-                # group-title cria categorias no player de IPTV
-                m3u += f'#EXTINF:-1{logo} group-title="{c["cat"]}",{c["nome"]}\n{c["url"]}\n'
-                count += 1
-
-        # Contador no final para auditoria
-        if count == 0:
-            m3u += "# ERRO: Site bloqueando acesso. Tente novamente em alguns minutos.\n"
-        else:
-            m3u += f"\n# TOTAL CAPTURADO: {count}\n"
-
-        return Response(m3u, mimetype='text/plain')
+        return Response(m3u_content, mimetype='text/plain')
 
     except Exception as e:
-        return f"Erro Crítico: {str(e)}", 500
+        return f"Erro ao gerar lista: {str(e)}", 500
 
 if __name__ == "__main__":
-    # O Railway gerencia a porta automaticamente pela variável de ambiente PORT
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
