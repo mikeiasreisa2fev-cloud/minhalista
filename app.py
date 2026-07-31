@@ -19,19 +19,18 @@ HEADERS = {
 
 @app.route('/')
 def home():
-    return jsonify({"status": "online", "message": "API Ycine Master Scraper v6"})
+    return jsonify({"status": "online", "message": "API Ycine Master Scraper v7"})
 
 def get_real_categories(session, server_id):
     """Busca as categorias reais para um servidor específico."""
     found_categories = []
     try:
         cat_page_url = f"{BASE_URL}/canais/categorias/?thema=1&server={server_id}"
-        r = session.get(cat_page_url, timeout=15)
+        r = session.get(cat_page_url, timeout=10)
         soup = BeautifulSoup(r.text, 'html.parser')
 
         for a in soup.find_all('a', href=True):
             href = a['href']
-            # Extrai o ID da categoria limpando a query string
             clean_href = href.split('?')[0]
             if '/canais/categorias/' in clean_href:
                 category_id = clean_href.strip('/').split('/')[-1]
@@ -47,7 +46,7 @@ def fetch_page(session, url, serv_label, serv_id, category_name):
     """Extrai canais de uma página específica."""
     canais_da_pagina = []
     try:
-        r = session.get(url, timeout=20)
+        r = session.get(url, timeout=15)
         if r.status_code != 200:
             return []
 
@@ -56,10 +55,7 @@ def fetch_page(session, url, serv_label, serv_id, category_name):
 
         for a in soup.find_all('a', href=True):
             href = a['href']
-
-            # Captura canais (/canais/ID ou /play/ID)
             if '/canais/' in href or '/play/' in href:
-                # Evita links de navegação
                 if '/canais/categorias' in href or 'page=' in href:
                     continue
 
@@ -74,7 +70,6 @@ def fetch_page(session, url, serv_label, serv_id, category_name):
                 if not nome or any(menu == nome.lower() for menu in menu_items):
                     continue
 
-                # Normaliza a URL final do player
                 full_url = href if href.startswith('http') else f"{BASE_URL}{href}"
                 if 'server=' not in full_url:
                     sep = '&' if '?' in full_url else '?'
@@ -106,32 +101,26 @@ def get_canais():
         ]
 
         tasks = []
-        with ThreadPoolExecutor(max_workers=20) as executor:
+        with ThreadPoolExecutor(max_workers=30) as executor:
             for serv in servidores:
-                # 1. Obtém as categorias específicas para ESTE servidor
                 categories = get_real_categories(session, serv['id'])
-
-                # 2. Varredura Geral (Páginas 1 a 10)
-                for page in range(1, 11):
+                for page in range(1, 6):
                     url = f"{BASE_URL}/canais?page={page}&thema=1&server={serv['id']}"
                     tasks.append(executor.submit(fetch_page, session, url, serv['label'], serv['id'], "Geral"))
-
-                # 3. Varredura por Categorias (Páginas 1 a 3 para garantir captura total)
                 for cat in categories:
-                    for page in range(1, 4):
-                        url_cat = f"{cat['url']}?page={page}&thema=1&server={serv['id']}"
-                        tasks.append(executor.submit(fetch_page, session, url_cat, serv['label'], serv['id'], cat['name']))
+                    url_cat = f"{cat['url']}?thema=1&server={serv['id']}"
+                    tasks.append(executor.submit(fetch_page, session, url_cat, serv['label'], serv['id'], cat['name']))
 
         links_vistos = set()
         m3u_content = "#EXTM3U\n"
         all_results = []
-
         for task in tasks:
-            all_results.extend(task.result())
+            try:
+                all_results.extend(task.result())
+            except:
+                continue
 
-        # Ordenação organizada para o player
         all_results.sort(key=lambda x: (x['category'], x['nome']))
-
         count = 0
         for canal in all_results:
             if canal['key'] not in links_vistos:
@@ -142,9 +131,8 @@ def get_canais():
 
         m3u_content += f"\n# TOTAL CAPTURADO: {count}\n"
         return Response(m3u_content, mimetype='text/plain')
-
     except Exception as e:
-        return f"Erro: {str(e)}", 500
+        return f"Erro fatal: {str(e)}", 500
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
