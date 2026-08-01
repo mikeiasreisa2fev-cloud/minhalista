@@ -12,11 +12,15 @@ app = Flask(__name__)
 REAL_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
 BASE_URL = 'https://app.pobreflix2.site'
 
+# VARIÁVEIS DE CACHE (Para o XCIPTV carregar instantâneo)
+cache_data = {"m3u": "", "timestamp": 0}
+CACHE_TIMEOUT = 3600  # Atualiza a cada 1 hora
+
 @app.route('/')
 def home():
-    return jsonify({"status": "online", "message": "API Ycine Master - Versão 35 XCIPTV Stable"})
+    return jsonify({"status": "online", "message": "API Ycine Master - Versão 36 XCIPTV Pro"})
 
-# ROTA DE REPRODUÇÃO FORMATADA PARA XCIPTV
+# ROTA DE REPRODUÇÃO - FULL PROXY COMPATÍVEL
 @app.route('/stream/<server_id>/<channel_id>.m3u8')
 def get_stream(server_id, channel_id):
     try:
@@ -74,10 +78,8 @@ def fetch_page(session, url, serv_label, serv_id, host, category_name="Geral"):
             canal_id = href.split('?')[0].rstrip('/').split('/')[-1]
             link_proxy = f"https://{host}/stream/{serv_id}/{canal_id}.m3u8"
 
-            # Organização por nome (Garante Infantil e HBO Max)
             final_category = category_name
             nome_up = nome.upper()
-
             if any(k in nome_up for k in infantil_keywords):
                 final_category = f"{serv_label} - Infantil"
             elif "HBO MAX" in nome_up or "MAX " in nome_up:
@@ -112,6 +114,12 @@ def get_real_categories(session, server_id):
 
 @app.route('/canais')
 def get_canais():
+    global cache_data
+
+    # Se a lista estiver no cache e não for antiga, entrega instantâneo
+    if cache_data["m3u"] and (time.time() - cache_data["timestamp"] < CACHE_TIMEOUT):
+        return Response(cache_data["m3u"], mimetype='text/plain')
+
     try:
         current_host = request.host
         session = requests.Session()
@@ -126,14 +134,12 @@ def get_canais():
         all_tasks = []
         with ThreadPoolExecutor(max_workers=30) as executor:
             for serv in servidores:
-                # Prioridade: Categorias
                 cats = get_real_categories(session, serv['id'])
                 for cat in cats:
                     base_cat = cat['url'].split('?')[0]
                     url_cat = f"{base_cat}?thema=1&server={serv['id']}&pagina=1"
                     all_tasks.append(executor.submit(fetch_page, session, url_cat, serv['label'], serv['id'], current_host, f"{serv['label']} - {cat['name']}"))
 
-                # Geral
                 for page in range(1, serv['max_p'] + 1):
                     url = f"{BASE_URL}/canais/?thema=1&server={serv['id']}&pagina={page}"
                     all_tasks.append(executor.submit(fetch_page, session, url, serv['label'], serv['id'], current_host, f"{serv['label']} - Geral"))
@@ -158,9 +164,14 @@ def get_canais():
                 count += 1
 
         m3u_content += f"\n# TOTAL CAPTURADO: {count}\n"
+
+        # SALVA NO CACHE
+        cache_data["m3u"] = m3u_content
+        cache_data["timestamp"] = time.time()
+
         return Response(m3u_content, mimetype='text/plain')
     except Exception as e:
-        return f"Erro fatal: {str(e)}", 500
+        return f"Erro: {str(e)}", 500
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
