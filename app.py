@@ -14,13 +14,12 @@ BASE_URL = 'https://app.pobreflix2.site'
 
 @app.route('/')
 def home():
-    return jsonify({"status": "online", "message": "API Ycine Master - Versão 34 XCIPTV Special"})
+    return jsonify({"status": "online", "message": "API Ycine Master - Versão 35 XCIPTV Stable"})
 
-# ROTA DE REPRODUÇÃO FORMATADA PARA XCIPTV (.m3u8 no final)
+# ROTA DE REPRODUÇÃO FORMATADA PARA XCIPTV
 @app.route('/stream/<server_id>/<channel_id>.m3u8')
 def get_stream(server_id, channel_id):
     try:
-        # Monta a URL de referência para o servidor aceitar a conexão
         url_referencia = f"{BASE_URL}/canais/{channel_id}?thema=1&server={server_id}"
         target_m3u8 = f"https://speed.megafilmeshd9.com/midia/{server_id}/{channel_id}.m3u8"
 
@@ -30,10 +29,9 @@ def get_stream(server_id, channel_id):
             'Origin': BASE_URL
         }
 
-        # O servidor Railway baixa a playlist e entrega "limpa" para o XCIPTV
         r = requests.get(target_m3u8, headers=headers, timeout=12)
         if r.status_code != 200:
-            return f"Erro no sinal original: {r.status_code}", 404
+            return f"Erro no sinal: {r.status_code}", 404
 
         playlist_lines = r.text.splitlines()
         new_playlist = []
@@ -41,29 +39,26 @@ def get_stream(server_id, channel_id):
 
         for line in playlist_lines:
             if line and not line.startswith('#'):
-                if not line.startswith('http'):
-                    new_playlist.append(video_base_url + line)
-                else:
-                    new_playlist.append(line)
+                new_playlist.append(video_base_url + line if not line.startswith('http') else line)
             else:
                 new_playlist.append(line)
 
-        # Resposta com Mimetype compatível com XCIPTV e CORS liberado
         response = Response('\n'.join(new_playlist), mimetype='application/x-mpegURL')
         response.headers.add('Access-Control-Allow-Origin', '*')
         return response
-
     except Exception as e:
         return f"Erro fatal: {str(e)}", 500
 
 def fetch_page(session, url, serv_label, serv_id, host, category_name="Geral"):
     canais_da_pagina = []
     try:
-        r = session.get(url, timeout=20)
+        r = session.get(url, timeout=15)
         if r.status_code != 200: return []
 
         soup = BeautifulSoup(r.text, 'html.parser')
         items = soup.find_all('a', class_='iptv-cat-item')
+
+        infantil_keywords = ["ADULT SWIM", "CARTOON", "KIDS", "GLOOB", "NICK", "RATIM", "TOONCAST", "ZOOMOO", "PREDIO AZUL", "RETRÔ"]
 
         for a in items:
             href = a['href']
@@ -73,24 +68,20 @@ def fetch_page(session, url, serv_label, serv_id, host, category_name="Geral"):
             img = a.find('img')
             if img: logo = img.get('src') or img.get('data-src') or ""
 
-            if not nome or any(menu in nome.lower() for menu in ['sair', 'minha conta', 'editar']):
+            if not nome or any(m in nome.lower() for m in ['sair', 'minha conta', 'editar']):
                 continue
 
             canal_id = href.split('?')[0].rstrip('/').split('/')[-1]
-
-            # NOVO FORMATO DE LINK PARA XCIPTV: /stream/servidor/id.m3u8
             link_proxy = f"https://{host}/stream/{serv_id}/{canal_id}.m3u8"
 
-            # LÓGICA DE ORGANIZAÇÃO MANUAL
+            # Organização por nome (Garante Infantil e HBO Max)
             final_category = category_name
             nome_up = nome.upper()
-            infantil_keywords = ["ADULT SWIM", "CARTOON", "KIDS", "GLOOB", "NICK", "RATIM", "TOONCAST", "ZOOMOO", "PREDIO AZUL", "RETRÔ"]
 
-            if serv_id in ["speed-1", "speed-2", "speed-3"]:
-                if any(k in nome_up for k in infantil_keywords):
-                    final_category = f"{serv_label} - Infantil"
-                elif serv_id == "speed-2" and "HBO MAX" in nome_up:
-                    final_category = f"{serv_label} - HBO Max"
+            if any(k in nome_up for k in infantil_keywords):
+                final_category = f"{serv_label} - Infantil"
+            elif "HBO MAX" in nome_up or "MAX " in nome_up:
+                final_category = f"{serv_label} - HBO Max"
 
             canais_da_pagina.append({
                 "nome": nome,
@@ -107,7 +98,7 @@ def get_real_categories(session, server_id):
     found_categories = []
     try:
         url = f"{BASE_URL}/canais/categorias/?thema=1&server={server_id}"
-        r = session.get(url, timeout=15)
+        r = session.get(url, timeout=10)
         soup = BeautifulSoup(r.text, 'html.parser')
         for a in soup.find_all('a', href=True):
             if '/canais/categorias/' in a['href']:
@@ -133,14 +124,16 @@ def get_canais():
         ]
 
         all_tasks = []
-        with ThreadPoolExecutor(max_workers=15) as executor:
+        with ThreadPoolExecutor(max_workers=30) as executor:
             for serv in servidores:
+                # Prioridade: Categorias
                 cats = get_real_categories(session, serv['id'])
                 for cat in cats:
                     base_cat = cat['url'].split('?')[0]
                     url_cat = f"{base_cat}?thema=1&server={serv['id']}&pagina=1"
                     all_tasks.append(executor.submit(fetch_page, session, url_cat, serv['label'], serv['id'], current_host, f"{serv['label']} - {cat['name']}"))
 
+                # Geral
                 for page in range(1, serv['max_p'] + 1):
                     url = f"{BASE_URL}/canais/?thema=1&server={serv['id']}&pagina={page}"
                     all_tasks.append(executor.submit(fetch_page, session, url, serv['label'], serv['id'], current_host, f"{serv['label']} - Geral"))
