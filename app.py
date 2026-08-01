@@ -14,21 +14,19 @@ BASE_URL = 'https://app.pobreflix2.site'
 
 @app.route('/')
 def home():
-    return jsonify({"status": "online", "message": "API Ycine Master - Versão 24 Corrigida"})
+    return jsonify({"status": "online", "message": "API Ycine Master - Versão 25 Identificação de Grupos"})
 
-# ROTA DE REPRODUÇÃO - SISTEMA DE PROXY COM CORREÇÃO DE URL (ERRO 400)
+# ROTA DE REPRODUÇÃO - SISTEMA DE PROXY COM CORREÇÃO DE URL
 @app.route('/stream')
 def get_stream():
     url_base_canal = request.args.get('url')
     if not url_base_canal: return "URL ausente", 400
 
     try:
-        # Extração de ID e Servidor
         parsed = urlparse(url_base_canal)
         path_parts = parsed.path.strip('/').split('/')
         qs = parse_qs(parsed.query)
 
-        # Recupera o server_id da URL interna ou dos argumentos da requisição (Resiliência contra erro 400)
         server_id = qs.get('server', [''])[0] or request.args.get('server', '')
         channel_id = path_parts[-1] if path_parts else ''
 
@@ -37,7 +35,6 @@ def get_stream():
 
         target_m3u8 = f"https://speed.megafilmeshd9.com/midia/{server_id}/{channel_id}.m3u8"
 
-        # Headers de autorização
         headers = {
             'User-Agent': REAL_UA,
             'Referer': url_base_canal,
@@ -49,7 +46,6 @@ def get_stream():
         if r.status_code != 200:
             return f"Erro no sinal original: {r.status_code}", 404
 
-        # REESCRITA DA PLAYLIST PARA ABSOLUTO (TS CHUNKS)
         playlist_lines = r.text.splitlines()
         new_playlist = []
         video_base_url = target_m3u8.rsplit('/', 1)[0] + "/"
@@ -88,20 +84,15 @@ def fetch_page(session, url, serv_label, serv_id, host, category_name="Geral"):
             if not nome or any(menu in nome.lower() for menu in ['sair', 'minha conta', 'editar']):
                 continue
 
-            # Extrai o ID do canal da URL original
             canal_id = href.split('?')[0].rstrip('/').split('/')[-1]
-
-            # Monta a URL que o nosso /stream vai processar (Encodada para evitar erro 400)
             internal_url = f"{BASE_URL}/canais/{canal_id}?thema=1&server={serv_id}"
-
-            # Link do proxy protegido com quote()
             link_proxy = f"https://{host}/stream?url={quote(internal_url)}&server={serv_id}"
 
             canais_da_pagina.append({
-                "nome": f"{nome} ({serv_label})",
+                "nome": nome, # Removido o (S1) do nome pois já estará no grupo
                 "url": link_proxy,
                 "logo": logo,
-                "category": category_name,
+                "category": category_name, # O nome do grupo agora vem pronto (Ex: S1 - Globo)
                 "chave": f"{serv_id}-{canal_id}"
             })
     except:
@@ -140,17 +131,21 @@ def get_canais():
         all_tasks = []
         with ThreadPoolExecutor(max_workers=15) as executor:
             for serv in servidores:
-                # Páginas gerais
+                # Páginas gerais com prefixo do servidor no grupo
                 for page in range(1, serv['max_p'] + 1):
                     url = f"{BASE_URL}/canais/?thema=1&server={serv['id']}&pagina={page}"
-                    all_tasks.append(executor.submit(fetch_page, session, url, serv['label'], serv['id'], current_host, "Geral"))
+                    # Identificando a categoria com o servidor
+                    cat_label = f"{serv['label']} - Geral"
+                    all_tasks.append(executor.submit(fetch_page, session, url, serv['label'], serv['id'], current_host, cat_label))
 
-                # Categorias
+                # Categorias com prefixo do servidor no grupo
                 cats = get_real_categories(session, serv['id'])
                 for cat in cats:
                     base_cat = cat['url'].split('?')[0]
                     url_cat = f"{base_cat}?thema=1&server={serv['id']}&pagina=1"
-                    all_tasks.append(executor.submit(fetch_page, session, url_cat, serv['label'], serv['id'], current_host, cat['name']))
+                    # Identificando a categoria com o servidor (Ex: S1 - Premiere)
+                    cat_label = f"{serv['label']} - {cat['name']}"
+                    all_tasks.append(executor.submit(fetch_page, session, url_cat, serv['label'], serv['id'], current_host, cat_label))
 
         results = []
         for task in all_tasks:
@@ -159,6 +154,7 @@ def get_canais():
                 if res: results.extend(res)
             except: continue
 
+        # Ordena para que os servidores fiquem agrupados (S1 primeiro, depois S2...)
         results.sort(key=lambda x: (x['category'], x['nome']))
 
         links_vistos = set()
@@ -168,6 +164,7 @@ def get_canais():
             if canal['chave'] not in links_vistos:
                 links_vistos.add(canal['chave'])
                 logo_attr = f' tvg-logo="{canal["logo"]}"' if canal["logo"] else ""
+                # O category aqui já contém o prefixo "S1 - ", "S2 - ", etc.
                 m3u_content += f'#EXTINF:-1{logo_attr} group-title="{canal["category"]}",{canal["nome"]}\n{canal["url"]}\n'
                 count += 1
 
