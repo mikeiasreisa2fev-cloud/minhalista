@@ -14,9 +14,9 @@ BASE_URL = 'https://app.pobreflix2.site'
 
 @app.route('/')
 def home():
-    return jsonify({"status": "online", "message": "API Ycine Master - Versão 27 Turbo Stable"})
+    return jsonify({"status": "online", "message": "API Ycine Master - Versão 25 Identificação de Grupos"})
 
-# ROTA DE REPRODUÇÃO - SISTEMA DE PROXY
+# ROTA DE REPRODUÇÃO - SISTEMA DE PROXY COM CORREÇÃO DE URL
 @app.route('/stream')
 def get_stream():
     url_base_canal = request.args.get('url')
@@ -26,6 +26,7 @@ def get_stream():
         parsed = urlparse(url_base_canal)
         path_parts = parsed.path.strip('/').split('/')
         qs = parse_qs(parsed.query)
+
         server_id = qs.get('server', [''])[0] or request.args.get('server', '')
         channel_id = path_parts[-1] if path_parts else ''
 
@@ -41,6 +42,7 @@ def get_stream():
         }
 
         r = requests.get(target_m3u8, headers=headers, timeout=10)
+
         if r.status_code != 200:
             return f"Erro no sinal original: {r.status_code}", 404
 
@@ -62,7 +64,7 @@ def get_stream():
     except Exception as e:
         return f"Erro fatal: {str(e)}", 500
 
-def fetch_page(session, url, serv_id, host, category_name="Geral"):
+def fetch_page(session, url, serv_label, serv_id, host, category_name="Geral"):
     canais_da_pagina = []
     try:
         r = session.get(url, timeout=20)
@@ -87,10 +89,10 @@ def fetch_page(session, url, serv_id, host, category_name="Geral"):
             link_proxy = f"https://{host}/stream?url={quote(internal_url)}&server={serv_id}"
 
             canais_da_pagina.append({
-                "nome": nome,
+                "nome": nome, # Removido o (S1) do nome pois já estará no grupo
                 "url": link_proxy,
                 "logo": logo,
-                "category": category_name,
+                "category": category_name, # O nome do grupo agora vem pronto (Ex: S1 - Globo)
                 "chave": f"{serv_id}-{canal_id}"
             })
     except:
@@ -101,16 +103,14 @@ def get_real_categories(session, server_id):
     found_categories = []
     try:
         url = f"{BASE_URL}/canais/categorias/?thema=1&server={server_id}"
-        r = session.get(url, timeout=12)
+        r = session.get(url, timeout=15)
         soup = BeautifulSoup(r.text, 'html.parser')
         for a in soup.find_all('a', href=True):
-            href = a['href']
-            # Filtra apenas categorias reais que possuem ID numérico
-            if '/canais/categorias/' in href and any(part.isdigit() for part in href.split('/')):
+            if '/canais/categorias/' in a['href']:
                 name = a.get_text(strip=True)
+                href = a['href']
                 full_url = href if href.startswith('http') else f"{BASE_URL}{href}"
-                if name and name.lower() not in ['próximo', 'anterior'] and not any(c['name'] == name for c in found_categories):
-                    found_categories.append({"name": name, "url": full_url})
+                if name: found_categories.append({"name": name, "url": full_url})
     except:
         pass
     return found_categories
@@ -129,23 +129,23 @@ def get_canais():
         ]
 
         all_tasks = []
-        # Aumentado workers para 30 para ser mais rápido e evitar timeout do Railway
-        with ThreadPoolExecutor(max_workers=30) as executor:
-            # PASSO 1: CATEGORIAS (Foca na página 1 para ser rápido e pegar o essencial como Infantil e HBO)
+        with ThreadPoolExecutor(max_workers=15) as executor:
             for serv in servidores:
+                # Páginas gerais com prefixo do servidor no grupo
+                for page in range(1, serv['max_p'] + 1):
+                    url = f"{BASE_URL}/canais/?thema=1&server={serv['id']}&pagina={page}"
+                    # Identificando a categoria com o servidor
+                    cat_label = f"{serv['label']} - Geral"
+                    all_tasks.append(executor.submit(fetch_page, session, url, serv['label'], serv['id'], current_host, cat_label))
+
+                # Categorias com prefixo do servidor no grupo
                 cats = get_real_categories(session, serv['id'])
                 for cat in cats:
                     base_cat = cat['url'].split('?')[0]
                     url_cat = f"{base_cat}?thema=1&server={serv['id']}&pagina=1"
+                    # Identificando a categoria com o servidor (Ex: S1 - Premiere)
                     cat_label = f"{serv['label']} - {cat['name']}"
-                    all_tasks.append(executor.submit(fetch_page, session, url_cat, serv['id'], current_host, cat_label))
-
-            # PASSO 2: GERAL (Varredura completa por páginas)
-            for serv in servidores:
-                for page in range(1, serv['max_p'] + 1):
-                    url = f"{BASE_URL}/canais/?thema=1&server={serv['id']}&pagina={page}"
-                    cat_label = f"{serv['label']} - Geral"
-                    all_tasks.append(executor.submit(fetch_page, session, url, serv['id'], current_host, cat_label))
+                    all_tasks.append(executor.submit(fetch_page, session, url_cat, serv['label'], serv['id'], current_host, cat_label))
 
         results = []
         for task in all_tasks:
@@ -154,7 +154,7 @@ def get_canais():
                 if res: results.extend(res)
             except: continue
 
-        # Ordenação inteligente (S1 primeiro, Categorias em ordem alfabética)
+        # Ordena para que os servidores fiquem agrupados (S1 primeiro, depois S2...)
         results.sort(key=lambda x: (x['category'], x['nome']))
 
         links_vistos = set()
@@ -164,13 +164,13 @@ def get_canais():
             if canal['chave'] not in links_vistos:
                 links_vistos.add(canal['chave'])
                 logo_attr = f' tvg-logo="{canal["logo"]}"' if canal["logo"] else ""
+                # O category aqui já contém o prefixo "S1 - ", "S2 - ", etc.
                 m3u_content += f'#EXTINF:-1{logo_attr} group-title="{canal["category"]}",{canal["nome"]}\n{canal["url"]}\n'
                 count += 1
 
         m3u_content += f"\n# TOTAL CAPTURADO: {count}\n"
         return Response(m3u_content, mimetype='text/plain')
     except Exception as e:
-        # Se der erro, mostra qual foi para podermos depurar
         return f"Erro fatal: {str(e)}", 500
 
 if __name__ == "__main__":
