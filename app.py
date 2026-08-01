@@ -4,6 +4,7 @@ import requests
 from bs4 import BeautifulSoup
 import time
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlparse, parse_qs
 
 app = Flask(__name__)
 
@@ -14,9 +15,9 @@ HEADERS = {
 
 @app.route('/')
 def home():
-    return jsonify({"status": "online", "message": "API Ycine Master - Versão 16 Playback Fix"})
+    return jsonify({"status": "online", "message": "API Ycine Master - Versão 18 Smart Play"})
 
-# ROTA PARA CAPTURAR O LINK REAL NO MOMENTO DO PLAY
+# ROTA INTELIGENTE PARA REPRODUÇÃO
 @app.route('/stream')
 def get_stream():
     url_base_canal = request.args.get('url')
@@ -24,47 +25,53 @@ def get_stream():
         return "URL ausente", 400
 
     try:
+        # 1. TENTATIVA POR LÓGICA PREDITIVA (Rápida e Sem Bloqueios)
+        # Extrai o ID e o Servidor direto da URL para montar o link .m3u8 final
+        parsed = urlparse(url_base_canal)
+        path_parts = parsed.path.strip('/').split('/')
+        qs = parse_qs(parsed.query)
+
+        server_id = qs.get('server', [''])[0]
+        channel_id = path_parts[-1] if path_parts else ''
+
+        # Se temos o ID e o Servidor, montamos o link direto que o site usa
+        if server_id and channel_id.isdigit():
+            link_direto = f"https://speed.megafilmeshd9.com/midia/{server_id}/{channel_id}.m3u8"
+            return redirect(link_direto)
+
+        # 2. TENTATIVA POR SCRAPER (Fallback se a lógica acima falhar)
         session = requests.Session()
-        # O Segredo: O Referer deve ser EXATAMENTE a URL da página do canal
         custom_headers = HEADERS.copy()
         custom_headers['Referer'] = url_base_canal
 
-        r = session.get(url_base_canal, headers=custom_headers, timeout=15)
+        r = session.get(url_base_canal, headers=custom_headers, timeout=10)
         soup = BeautifulSoup(r.text, 'html.parser')
 
-        # 1. Tenta encontrar o botão "Player Grátis"
-        botao_player = soup.find('a', class_='iptv-player-gratis')
+        link_final = None
+        play_div = soup.find(id='iptv-play-button')
+        if play_div and play_div.get('data-url'):
+            link_final = play_div['data-url']
 
-        # 2. Se não achou, procura qualquer link que contenha a classe 'iptv-player'
-        if not botao_player:
-            botao_player = soup.find('a', class_=lambda x: x and 'iptv-player' in x)
+        if not link_final:
+            botao = soup.find('a', class_='iptv-player-gratis')
+            if botao and botao.get('href'):
+                link_final = botao['href']
 
-        # 3. Se ainda não achou, procura por um Iframe (comum no Servidor 3)
-        if not botao_player:
-            iframe = soup.find('iframe')
-            if iframe and iframe.get('src'):
-                return redirect(iframe['src'])
-
-        if botao_player and botao_player.get('href'):
-            link_final = botao_player['href']
-
-            # Garante que a URL seja absoluta
+        if link_final:
             if link_final.startswith('/'):
                 link_final = f"https://app.pobreflix2.site{link_final}"
-
-            # Redireciona o player de IPTV para o link real
             return redirect(link_final)
 
-        return "Link de reprodução não encontrado para este canal/servidor", 404
+        return "Não foi possível extrair o link deste canal", 404
+
     except Exception as e:
-        return f"Erro ao capturar stream: {str(e)}", 500
+        return f"Erro no servidor: {str(e)}", 500
 
 def fetch_page(session, url, serv_label, serv_id, host, category_name="Geral"):
     canais_da_pagina = []
     try:
-        r = session.get(url, timeout=25)
-        if r.status_code != 200:
-            return []
+        r = session.get(url, timeout=20)
+        if r.status_code != 200: return []
 
         soup = BeautifulSoup(r.text, 'html.parser')
         items = soup.find_all('a', class_='iptv-cat-item')
@@ -74,26 +81,17 @@ def fetch_page(session, url, serv_label, serv_id, host, category_name="Geral"):
             href = a['href']
             h4 = a.find('h4')
             nome = h4.get_text(strip=True) if h4 else ""
-
             logo = ""
             img = a.find('img')
-            if img:
-                logo = img.get('src') or img.get('data-src') or ""
-                if not nome:
-                    nome = img.get('alt') or img.get('title') or ""
+            if img: logo = img.get('src') or img.get('data-src') or ""
 
             if not nome or any(menu == nome.lower() for menu in menu_items):
                 continue
 
             full_url = href if href.startswith('http') else f"https://app.pobreflix2.site{href}"
-
-            # Garante que o servidor correto seja passado
             if 'server=' not in full_url:
                 sep = '&' if '?' in full_url else '?'
                 full_url = f"{full_url}{sep}server={serv_id}&thema=1"
-            else:
-                if f"server={serv_id}" not in full_url:
-                    full_url = full_url.split('server=')[0] + f"server={serv_id}&thema=1"
 
             link_proxy = f"https://{host}/stream?url={full_url}"
 
@@ -116,12 +114,8 @@ def get_real_categories(session, server_id):
         soup = BeautifulSoup(r.text, 'html.parser')
         for a in soup.find_all('a', href=True):
             if '/canais/categorias/' in a['href']:
-                href_clean = a['href'].split('?')[0].rstrip('/')
-                cat_id = href_clean.split('/')[-1]
-                if cat_id.isdigit():
-                    name = a.get_text(strip=True)
-                    if name:
-                        found_categories.append({"name": name, "url": a['href']})
+                name = a.get_text(strip=True)
+                if name: found_categories.append({"name": name, "url": a['href']})
     except:
         pass
     return found_categories
@@ -140,7 +134,7 @@ def get_canais():
         ]
 
         all_tasks = []
-        with ThreadPoolExecutor(max_workers=20) as executor:
+        with ThreadPoolExecutor(max_workers=25) as executor:
             for serv in servidores:
                 for page in range(1, serv['max_p'] + 1):
                     url = f"https://app.pobreflix2.site/canais/?thema=1&server={serv['id']}&pagina={page}"
@@ -154,17 +148,15 @@ def get_canais():
 
         links_vistos = set()
         m3u_content = "#EXTM3U\n"
-        count = 0
         results = []
 
         for task in all_tasks:
-            try:
-                results.extend(task.result())
-            except:
-                continue
+            try: results.extend(task.result())
+            except: continue
 
         results.sort(key=lambda x: (x['category'], x['nome']))
 
+        count = 0
         for canal in results:
             if canal['chave'] not in links_vistos:
                 links_vistos.add(canal['chave'])
@@ -174,7 +166,6 @@ def get_canais():
 
         m3u_content += f"\n# TOTAL CAPTURADO: {count}\n"
         return Response(m3u_content, mimetype='text/plain')
-
     except Exception as e:
         return f"Erro fatal: {str(e)}", 500
 
