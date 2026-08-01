@@ -15,7 +15,7 @@ HEADERS = {
 
 @app.route('/')
 def home():
-    return jsonify({"status": "online", "message": "API Ycine Master - Versão Redirect 13"})
+    return jsonify({"status": "online", "message": "API Ycine Master - Versão Redirect 14 Fix"})
 
 # ROTA PARA CAPTURAR O LINK REAL NO MOMENTO DO PLAY
 @app.route('/stream')
@@ -25,23 +25,19 @@ def get_stream():
         return "URL ausente", 400
 
     try:
-        # Entra na página do canal para pegar o link do botão "Player Grátis"
         r = requests.get(url_base_canal, headers=HEADERS, timeout=15)
         soup = BeautifulSoup(r.text, 'html.parser')
-
-        # Procura o link dentro da classe que você informou
         botao_player = soup.find('a', class_='iptv-player-gratis')
 
         if botao_player and botao_player.get('href'):
             link_final = botao_player['href']
-            # Redireciona o player de IPTV para o link real do vídeo
             return redirect(link_final)
 
         return "Link final não encontrado na página", 404
     except Exception as e:
         return f"Erro ao capturar stream: {str(e)}", 500
 
-def fetch_page(session, url, serv_label, serv_id, category_name="Geral"):
+def fetch_page(session, url, serv_label, serv_id, host, category_name="Geral"):
     canais_da_pagina = []
     try:
         r = session.get(url, timeout=25)
@@ -50,7 +46,6 @@ def fetch_page(session, url, serv_label, serv_id, category_name="Geral"):
 
         soup = BeautifulSoup(r.text, 'html.parser')
         items = soup.find_all('a', class_='iptv-cat-item')
-
         menu_items = ['início', 'filmes', 'séries', 'minha conta', 'sair', 'contato', 'termos', 'editar conta']
 
         for a in items:
@@ -73,9 +68,7 @@ def fetch_page(session, url, serv_label, serv_id, category_name="Geral"):
                 sep = '&' if '?' in full_url else '?'
                 full_url = f"{full_url}{sep}server={serv_id}&thema=1"
 
-            # AGORA O LINK DA M3U APONTA PARA A SUA ROTA /stream
-            # O host será detectado automaticamente (seja localhost ou railway)
-            host = request.host
+            # O host agora é passado como argumento, resolvendo o bug do sumiço
             link_proxy = f"https://{host}/stream?url={full_url}"
 
             canais_da_pagina.append({
@@ -110,6 +103,9 @@ def get_real_categories(session, server_id):
 @app.route('/canais')
 def get_canais():
     try:
+        # Detecta o host antes de entrar nas threads
+        current_host = request.host
+
         session = requests.Session()
         session.headers.update(HEADERS)
 
@@ -124,12 +120,13 @@ def get_canais():
             for serv in servidores:
                 for page in range(1, serv['max_p'] + 1):
                     url = f"https://app.pobreflix2.site/canais/?thema=1&server={serv['id']}&pagina={page}"
-                    all_tasks.append(executor.submit(fetch_page, session, url, serv['label'], serv['id'], "Geral"))
+                    # Passamos o current_host aqui
+                    all_tasks.append(executor.submit(fetch_page, session, url, serv['label'], serv['id'], current_host, "Geral"))
 
                 cats = get_real_categories(session, serv['id'])
                 for cat in cats:
                     url_cat = f"{cat['url']}&server={serv['id']}&pagina=1"
-                    all_tasks.append(executor.submit(fetch_page, session, url_cat, serv['label'], serv['id'], cat['name']))
+                    all_tasks.append(executor.submit(fetch_page, session, url_cat, serv['label'], serv['id'], current_host, cat['name']))
 
         links_vistos = set()
         m3u_content = "#EXTM3U\n"
