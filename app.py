@@ -10,12 +10,13 @@ app = Flask(__name__)
 
 # Configurações globais
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Referer': 'https://app.pobreflix2.site/'
 }
 
 @app.route('/')
 def home():
-    return jsonify({"status": "online", "message": "API Ycine Master - Versão 18 Smart Play"})
+    return jsonify({"status": "online", "message": "API Ycine Master - Versão 19 Final Estável"})
 
 # ROTA INTELIGENTE PARA REPRODUÇÃO
 @app.route('/stream')
@@ -25,8 +26,7 @@ def get_stream():
         return "URL ausente", 400
 
     try:
-        # 1. TENTATIVA POR LÓGICA PREDITIVA (Rápida e Sem Bloqueios)
-        # Extrai o ID e o Servidor direto da URL para montar o link .m3u8 final
+        # 1. TENTATIVA POR LÓGICA PREDITIVA (Rápida)
         parsed = urlparse(url_base_canal)
         path_parts = parsed.path.strip('/').split('/')
         qs = parse_qs(parsed.query)
@@ -34,17 +34,12 @@ def get_stream():
         server_id = qs.get('server', [''])[0]
         channel_id = path_parts[-1] if path_parts else ''
 
-        # Se temos o ID e o Servidor, montamos o link direto que o site usa
         if server_id and channel_id.isdigit():
             link_direto = f"https://speed.megafilmeshd9.com/midia/{server_id}/{channel_id}.m3u8"
             return redirect(link_direto)
 
-        # 2. TENTATIVA POR SCRAPER (Fallback se a lógica acima falhar)
-        session = requests.Session()
-        custom_headers = HEADERS.copy()
-        custom_headers['Referer'] = url_base_canal
-
-        r = session.get(url_base_canal, headers=custom_headers, timeout=10)
+        # 2. FALLBACK POR SCRAPER
+        r = requests.get(url_base_canal, headers=HEADERS, timeout=10)
         soup = BeautifulSoup(r.text, 'html.parser')
 
         link_final = None
@@ -63,7 +58,6 @@ def get_stream():
             return redirect(link_final)
 
         return "Não foi possível extrair o link deste canal", 404
-
     except Exception as e:
         return f"Erro no servidor: {str(e)}", 500
 
@@ -115,7 +109,10 @@ def get_real_categories(session, server_id):
         for a in soup.find_all('a', href=True):
             if '/canais/categorias/' in a['href']:
                 name = a.get_text(strip=True)
-                if name: found_categories.append({"name": name, "url": a['href']})
+                href = a['href']
+                # Correção da URL absoluta para a categoria
+                full_url = href if href.startswith('http') else f"https://app.pobreflix2.site{href}"
+                if name: found_categories.append({"name": name, "url": full_url})
     except:
         pass
     return found_categories
@@ -134,28 +131,32 @@ def get_canais():
         ]
 
         all_tasks = []
-        with ThreadPoolExecutor(max_workers=25) as executor:
+        # Reduzi workers para 15 para evitar bloqueios por excesso de requisições
+        with ThreadPoolExecutor(max_workers=15) as executor:
             for serv in servidores:
+                # Páginas Gerais
                 for page in range(1, serv['max_p'] + 1):
                     url = f"https://app.pobreflix2.site/canais/?thema=1&server={serv['id']}&pagina={page}"
                     all_tasks.append(executor.submit(fetch_page, session, url, serv['label'], serv['id'], current_host, "Geral"))
 
+                # Páginas de Categorias
                 cats = get_real_categories(session, serv['id'])
                 for cat in cats:
                     base_cat = cat['url'].split('?')[0]
                     url_cat = f"{base_cat}?thema=1&server={serv['id']}&pagina=1"
                     all_tasks.append(executor.submit(fetch_page, session, url_cat, serv['label'], serv['id'], current_host, cat['name']))
 
-        links_vistos = set()
-        m3u_content = "#EXTM3U\n"
         results = []
-
         for task in all_tasks:
-            try: results.extend(task.result())
+            try:
+                res = task.result()
+                if res: results.extend(res)
             except: continue
 
         results.sort(key=lambda x: (x['category'], x['nome']))
 
+        links_vistos = set()
+        m3u_content = "#EXTM3U\n"
         count = 0
         for canal in results:
             if canal['chave'] not in links_vistos:
