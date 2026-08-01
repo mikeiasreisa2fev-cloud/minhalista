@@ -14,9 +14,9 @@ BASE_URL = 'https://app.pobreflix2.site'
 
 @app.route('/')
 def home():
-    return jsonify({"status": "online", "message": "API Ycine Master - Versão 25 Identificação de Grupos"})
+    return jsonify({"status": "online", "message": "API Ycine Master - Versão 26 Categoria Priority"})
 
-# ROTA DE REPRODUÇÃO - SISTEMA DE PROXY COM CORREÇÃO DE URL
+# ROTA DE REPRODUÇÃO - SISTEMA DE PROXY
 @app.route('/stream')
 def get_stream():
     url_base_canal = request.args.get('url')
@@ -26,7 +26,6 @@ def get_stream():
         parsed = urlparse(url_base_canal)
         path_parts = parsed.path.strip('/').split('/')
         qs = parse_qs(parsed.query)
-
         server_id = qs.get('server', [''])[0] or request.args.get('server', '')
         channel_id = path_parts[-1] if path_parts else ''
 
@@ -42,7 +41,6 @@ def get_stream():
         }
 
         r = requests.get(target_m3u8, headers=headers, timeout=10)
-
         if r.status_code != 200:
             return f"Erro no sinal original: {r.status_code}", 404
 
@@ -67,7 +65,7 @@ def get_stream():
 def fetch_page(session, url, serv_label, serv_id, host, category_name="Geral"):
     canais_da_pagina = []
     try:
-        r = session.get(url, timeout=20)
+        r = session.get(url, timeout=25)
         if r.status_code != 200: return []
 
         soup = BeautifulSoup(r.text, 'html.parser')
@@ -89,10 +87,10 @@ def fetch_page(session, url, serv_label, serv_id, host, category_name="Geral"):
             link_proxy = f"https://{host}/stream?url={quote(internal_url)}&server={serv_id}"
 
             canais_da_pagina.append({
-                "nome": nome, # Removido o (S1) do nome pois já estará no grupo
+                "nome": nome,
                 "url": link_proxy,
                 "logo": logo,
-                "category": category_name, # O nome do grupo agora vem pronto (Ex: S1 - Globo)
+                "category": category_name,
                 "chave": f"{serv_id}-{canal_id}"
             })
     except:
@@ -106,11 +104,13 @@ def get_real_categories(session, server_id):
         r = session.get(url, timeout=15)
         soup = BeautifulSoup(r.text, 'html.parser')
         for a in soup.find_all('a', href=True):
-            if '/canais/categorias/' in a['href']:
+            # Captura links de categorias com e sem barra final
+            if '/canais/categorias/' in a['href'] or '/canais/categorias?' in a['href']:
                 name = a.get_text(strip=True)
                 href = a['href']
                 full_url = href if href.startswith('http') else f"{BASE_URL}{href}"
-                if name: found_categories.append({"name": name, "url": full_url})
+                if name and not any(c['name'] == name for c in found_categories):
+                    found_categories.append({"name": name, "url": full_url})
     except:
         pass
     return found_categories
@@ -129,23 +129,24 @@ def get_canais():
         ]
 
         all_tasks = []
-        with ThreadPoolExecutor(max_workers=15) as executor:
+        with ThreadPoolExecutor(max_workers=20) as executor:
+            # PASSO 1: Capturar CATEGORIAS primeiro (Garante que Infantil e HBO Max tenham seus grupos)
             for serv in servidores:
-                # Páginas gerais com prefixo do servidor no grupo
-                for page in range(1, serv['max_p'] + 1):
-                    url = f"{BASE_URL}/canais/?thema=1&server={serv['id']}&pagina={page}"
-                    # Identificando a categoria com o servidor
-                    cat_label = f"{serv['label']} - Geral"
-                    all_tasks.append(executor.submit(fetch_page, session, url, serv['label'], serv['id'], current_host, cat_label))
-
-                # Categorias com prefixo do servidor no grupo
                 cats = get_real_categories(session, serv['id'])
                 for cat in cats:
                     base_cat = cat['url'].split('?')[0]
-                    url_cat = f"{base_cat}?thema=1&server={serv['id']}&pagina=1"
-                    # Identificando a categoria com o servidor (Ex: S1 - Premiere)
-                    cat_label = f"{serv['label']} - {cat['name']}"
-                    all_tasks.append(executor.submit(fetch_page, session, url_cat, serv['label'], serv['id'], current_host, cat_label))
+                    # Varre até 2 páginas por categoria para não perder nada
+                    for p in range(1, 3):
+                        url_cat = f"{base_cat}?thema=1&server={serv['id']}&pagina={p}"
+                        cat_label = f"{serv['label']} - {cat['name']}"
+                        all_tasks.append(executor.submit(fetch_page, session, url_cat, serv['label'], serv['id'], current_host, cat_label))
+
+            # PASSO 2: Capturar GERAL depois (Para pegar canais que não estão em categorias)
+            for serv in servidores:
+                for page in range(1, serv['max_p'] + 1):
+                    url = f"{BASE_URL}/canais/?thema=1&server={serv['id']}&pagina={page}"
+                    cat_label = f"{serv['label']} - Geral"
+                    all_tasks.append(executor.submit(fetch_page, session, url, serv['label'], serv['id'], current_host, cat_label))
 
         results = []
         for task in all_tasks:
@@ -154,17 +155,17 @@ def get_canais():
                 if res: results.extend(res)
             except: continue
 
-        # Ordena para que os servidores fiquem agrupados (S1 primeiro, depois S2...)
+        # Ordenação inteligente
         results.sort(key=lambda x: (x['category'], x['nome']))
 
         links_vistos = set()
         m3u_content = "#EXTM3U\n"
         count = 0
         for canal in results:
+            # O link_visto garante que se ele já entrou no grupo "Infantil", não entrará no "Geral"
             if canal['chave'] not in links_vistos:
                 links_vistos.add(canal['chave'])
                 logo_attr = f' tvg-logo="{canal["logo"]}"' if canal["logo"] else ""
-                # O category aqui já contém o prefixo "S1 - ", "S2 - ", etc.
                 m3u_content += f'#EXTINF:-1{logo_attr} group-title="{canal["category"]}",{canal["nome"]}\n{canal["url"]}\n'
                 count += 1
 
