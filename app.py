@@ -12,45 +12,28 @@ app = Flask(__name__)
 REAL_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
 BASE_URL = 'https://app.pobreflix2.site'
 
-# CACHE DE LISTA (M3U)
+# VARIÁVEIS DE CACHE (Para o XCIPTV carregar instantâneo)
 cache_data = {"m3u": "", "timestamp": 0}
-CACHE_TIMEOUT = 3600
-
-# CACHE DE STREAM (Para abertura instantânea dos canais)
-stream_cache = {}
-STREAM_CACHE_TIMEOUT = 15 # Segundos
-
-# SESSÃO GLOBAL (Aumenta a velocidade de reprodução drasticamente)
-playback_session = requests.Session()
-playback_session.headers.update({'User-Agent': REAL_UA})
+CACHE_TIMEOUT = 3600  # Atualiza a cada 1 hora
 
 @app.route('/')
 def home():
-    return jsonify({"status": "online", "message": "API Ycine Master - Versão 37 Fast Stream"})
+    return jsonify({"status": "online", "message": "API Ycine Master - Versão 36 XCIPTV Pro"})
 
-# ROTA DE REPRODUÇÃO TURBINADA
+# ROTA DE REPRODUÇÃO - FULL PROXY COMPATÍVEL
 @app.route('/stream/<server_id>/<channel_id>.m3u8')
 def get_stream(server_id, channel_id):
-    cache_key = f"{server_id}_{channel_id}"
-    now = time.time()
-
-    # Se o canal foi aberto nos últimos 15 segundos, entrega o link salvo (Instantâneo)
-    if cache_key in stream_cache:
-        data, ts = stream_cache[cache_key]
-        if now - ts < STREAM_CACHE_TIMEOUT:
-            return Response(data, mimetype='application/x-mpegURL', headers={'Access-Control-Allow-Origin': '*'})
-
     try:
         url_referencia = f"{BASE_URL}/canais/{channel_id}?thema=1&server={server_id}"
         target_m3u8 = f"https://speed.megafilmeshd9.com/midia/{server_id}/{channel_id}.m3u8"
 
         headers = {
+            'User-Agent': REAL_UA,
             'Referer': url_referencia,
             'Origin': BASE_URL
         }
 
-        # Usa a sessão persistente para carregar o sinal mais rápido
-        r = playback_session.get(target_m3u8, headers=headers, timeout=6)
+        r = requests.get(target_m3u8, headers=headers, timeout=12)
         if r.status_code != 200:
             return f"Erro no sinal: {r.status_code}", 404
 
@@ -58,31 +41,27 @@ def get_stream(server_id, channel_id):
         new_playlist = []
         video_base_url = target_m3u8.rsplit('/', 1)[0] + "/"
 
-        # Processamento ultra-rápido de linhas
         for line in playlist_lines:
             if line and not line.startswith('#'):
                 new_playlist.append(video_base_url + line if not line.startswith('http') else line)
             else:
                 new_playlist.append(line)
 
-        final_content = '\n'.join(new_playlist)
-
-        # Salva no cache de stream
-        stream_cache[cache_key] = (final_content, now)
-
-        response = Response(final_content, mimetype='application/x-mpegURL')
+        response = Response('\n'.join(new_playlist), mimetype='application/x-mpegURL')
         response.headers.add('Access-Control-Allow-Origin', '*')
         return response
     except Exception as e:
-        return f"Erro: {str(e)}", 500
+        return f"Erro fatal: {str(e)}", 500
 
 def fetch_page(session, url, serv_label, serv_id, host, category_name="Geral"):
     canais_da_pagina = []
     try:
-        r = session.get(url, timeout=12)
+        r = session.get(url, timeout=15)
         if r.status_code != 200: return []
+
         soup = BeautifulSoup(r.text, 'html.parser')
         items = soup.find_all('a', class_='iptv-cat-item')
+
         infantil_keywords = ["ADULT SWIM", "CARTOON", "KIDS", "GLOOB", "NICK", "RATIM", "TOONCAST", "ZOOMOO", "PREDIO AZUL", "RETRÔ"]
 
         for a in items:
@@ -92,7 +71,9 @@ def fetch_page(session, url, serv_label, serv_id, host, category_name="Geral"):
             logo = ""
             img = a.find('img')
             if img: logo = img.get('src') or img.get('data-src') or ""
-            if not nome or any(m in nome.lower() for m in ['sair', 'minha conta', 'editar']): continue
+
+            if not nome or any(m in nome.lower() for m in ['sair', 'minha conta', 'editar']):
+                continue
 
             canal_id = href.split('?')[0].rstrip('/').split('/')[-1]
             link_proxy = f"https://{host}/stream/{serv_id}/{canal_id}.m3u8"
@@ -111,7 +92,8 @@ def fetch_page(session, url, serv_label, serv_id, host, category_name="Geral"):
                 "category": final_category,
                 "chave": f"{serv_id}-{canal_id}"
             })
-    except: pass
+    except:
+        pass
     return canais_da_pagina
 
 def get_real_categories(session, server_id):
@@ -126,12 +108,15 @@ def get_real_categories(session, server_id):
                 href = a['href']
                 full_url = href if href.startswith('http') else f"{BASE_URL}{href}"
                 if name: found_categories.append({"name": name, "url": full_url})
-    except: pass
+    except:
+        pass
     return found_categories
 
 @app.route('/canais')
 def get_canais():
     global cache_data
+
+    # Se a lista estiver no cache e não for antiga, entrega instantâneo
     if cache_data["m3u"] and (time.time() - cache_data["timestamp"] < CACHE_TIMEOUT):
         return Response(cache_data["m3u"], mimetype='text/plain')
 
@@ -139,6 +124,7 @@ def get_canais():
         current_host = request.host
         session = requests.Session()
         session.headers.update({'User-Agent': REAL_UA})
+
         servidores = [
             {"id": "speed-1", "label": "S1", "max_p": 59},
             {"id": "speed-2", "label": "S2", "max_p": 67},
@@ -166,6 +152,7 @@ def get_canais():
             except: continue
 
         results.sort(key=lambda x: (x['category'].replace('Geral', 'ZZZ'), x['nome']))
+
         links_vistos = set()
         m3u_content = "#EXTM3U\n"
         count = 0
@@ -177,8 +164,11 @@ def get_canais():
                 count += 1
 
         m3u_content += f"\n# TOTAL CAPTURADO: {count}\n"
+
+        # SALVA NO CACHE
         cache_data["m3u"] = m3u_content
         cache_data["timestamp"] = time.time()
+
         return Response(m3u_content, mimetype='text/plain')
     except Exception as e:
         return f"Erro: {str(e)}", 500
