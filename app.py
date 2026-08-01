@@ -9,13 +9,12 @@ app = Flask(__name__)
 
 # Configurações globais
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Referer': 'https://app.pobreflix2.site/'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 }
 
 @app.route('/')
 def home():
-    return jsonify({"status": "online", "message": "API Ycine Master - Versão 15 Multi-Server Fix"})
+    return jsonify({"status": "online", "message": "API Ycine Master - Versão 16 Playback Fix"})
 
 # ROTA PARA CAPTURAR O LINK REAL NO MOMENTO DO PLAY
 @app.route('/stream')
@@ -25,30 +24,38 @@ def get_stream():
         return "URL ausente", 400
 
     try:
-        # Criamos uma sessão para lidar com possíveis cookies de servidor
         session = requests.Session()
-        # O Referer precisa ser a página do canal para os Servidores 2 e 3 funcionarem
+        # O Segredo: O Referer deve ser EXATAMENTE a URL da página do canal
         custom_headers = HEADERS.copy()
+        custom_headers['Referer'] = url_base_canal
 
         r = session.get(url_base_canal, headers=custom_headers, timeout=15)
         soup = BeautifulSoup(r.text, 'html.parser')
 
-        # Tenta encontrar o botão "Player Grátis" (Padrão S1, S2, S3)
+        # 1. Tenta encontrar o botão "Player Grátis"
         botao_player = soup.find('a', class_='iptv-player-gratis')
 
-        # Caso não encontre pela classe, procura qualquer link que contenha padrões de vídeo
+        # 2. Se não achou, procura qualquer link que contenha a classe 'iptv-player'
         if not botao_player:
-            for a in soup.find_all('a', href=True):
-                if 'class' in a.attrs and 'iptv-player' in str(a['class']):
-                    botao_player = a
-                    break
+            botao_player = soup.find('a', class_=lambda x: x and 'iptv-player' in x)
+
+        # 3. Se ainda não achou, procura por um Iframe (comum no Servidor 3)
+        if not botao_player:
+            iframe = soup.find('iframe')
+            if iframe and iframe.get('src'):
+                return redirect(iframe['src'])
 
         if botao_player and botao_player.get('href'):
             link_final = botao_player['href']
-            # Redireciona para o link direto do vídeo
+
+            # Garante que a URL seja absoluta
+            if link_final.startswith('/'):
+                link_final = f"https://app.pobreflix2.site{link_final}"
+
+            # Redireciona o player de IPTV para o link real
             return redirect(link_final)
 
-        return "Link de reprodução não encontrado para este servidor", 404
+        return "Link de reprodução não encontrado para este canal/servidor", 404
     except Exception as e:
         return f"Erro ao capturar stream: {str(e)}", 500
 
@@ -80,16 +87,14 @@ def fetch_page(session, url, serv_label, serv_id, host, category_name="Geral"):
 
             full_url = href if href.startswith('http') else f"https://app.pobreflix2.site{href}"
 
-            # Garante que o servidor correto seja passado na URL interna
+            # Garante que o servidor correto seja passado
             if 'server=' not in full_url:
                 sep = '&' if '?' in full_url else '?'
                 full_url = f"{full_url}{sep}server={serv_id}&thema=1"
             else:
-                # Se já tem server, garante que seja o ID correto deste loop
                 if f"server={serv_id}" not in full_url:
                     full_url = full_url.split('server=')[0] + f"server={serv_id}&thema=1"
 
-            # Link de proxy apontando para o seu Railway
             link_proxy = f"https://{host}/stream?url={full_url}"
 
             canais_da_pagina.append({
@@ -143,7 +148,6 @@ def get_canais():
 
                 cats = get_real_categories(session, serv['id'])
                 for cat in cats:
-                    # Monta URL da categoria forçando o servidor correto
                     base_cat = cat['url'].split('?')[0]
                     url_cat = f"{base_cat}?thema=1&server={serv['id']}&pagina=1"
                     all_tasks.append(executor.submit(fetch_page, session, url_cat, serv['label'], serv['id'], current_host, cat['name']))
