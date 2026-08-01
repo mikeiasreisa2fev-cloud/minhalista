@@ -8,39 +8,30 @@ from urllib.parse import urlparse, parse_qs, quote
 
 app = Flask(__name__)
 
-# Configurações de Identidade Real para evitar bloqueios
+# Configurações de Identidade Real
 REAL_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
 BASE_URL = 'https://app.pobreflix2.site'
 
 @app.route('/')
 def home():
-    return jsonify({"status": "online", "message": "API Ycine Master - Versão 33 Organização Total S1/S2/S3"})
+    return jsonify({"status": "online", "message": "API Ycine Master - Versão 34 XCIPTV Special"})
 
-# ROTA DE REPRODUÇÃO - SISTEMA DE PROXY PARA BYPASS DE 404
-@app.route('/stream')
-def get_stream():
-    url_base_canal = request.args.get('url')
-    if not url_base_canal: return "URL ausente", 400
-
+# ROTA DE REPRODUÇÃO FORMATADA PARA XCIPTV (.m3u8 no final)
+@app.route('/stream/<server_id>/<channel_id>.m3u8')
+def get_stream(server_id, channel_id):
     try:
-        parsed = urlparse(url_base_canal)
-        path_parts = parsed.path.strip('/').split('/')
-        qs = parse_qs(parsed.query)
-        server_id = qs.get('server', [''])[0] or request.args.get('server', '')
-        channel_id = path_parts[-1] if path_parts else ''
-
-        if not (server_id and channel_id.isdigit()):
-            return f"Erro: Servidor({server_id}) ou ID({channel_id}) inválido", 400
-
+        # Monta a URL de referência para o servidor aceitar a conexão
+        url_referencia = f"{BASE_URL}/canais/{channel_id}?thema=1&server={server_id}"
         target_m3u8 = f"https://speed.megafilmeshd9.com/midia/{server_id}/{channel_id}.m3u8"
 
         headers = {
             'User-Agent': REAL_UA,
-            'Referer': url_base_canal,
+            'Referer': url_referencia,
             'Origin': BASE_URL
         }
 
-        r = requests.get(target_m3u8, headers=headers, timeout=10)
+        # O servidor Railway baixa a playlist e entrega "limpa" para o XCIPTV
+        r = requests.get(target_m3u8, headers=headers, timeout=12)
         if r.status_code != 200:
             return f"Erro no sinal original: {r.status_code}", 404
 
@@ -57,7 +48,10 @@ def get_stream():
             else:
                 new_playlist.append(line)
 
-        return Response('\n'.join(new_playlist), mimetype='application/vnd.apple.mpegurl')
+        # Resposta com Mimetype compatível com XCIPTV e CORS liberado
+        response = Response('\n'.join(new_playlist), mimetype='application/x-mpegURL')
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        return response
 
     except Exception as e:
         return f"Erro fatal: {str(e)}", 500
@@ -83,25 +77,18 @@ def fetch_page(session, url, serv_label, serv_id, host, category_name="Geral"):
                 continue
 
             canal_id = href.split('?')[0].rstrip('/').split('/')[-1]
-            internal_url = f"{BASE_URL}/canais/{canal_id}?thema=1&server={serv_id}"
-            link_proxy = f"https://{host}/stream?url={quote(internal_url)}&server={serv_id}"
 
-            # --- LÓGICA DE ORGANIZAÇÃO MANUAL (S1, S2 e S3) ---
+            # NOVO FORMATO DE LINK PARA XCIPTV: /stream/servidor/id.m3u8
+            link_proxy = f"https://{host}/stream/{serv_id}/{canal_id}.m3u8"
+
+            # LÓGICA DE ORGANIZAÇÃO MANUAL
             final_category = category_name
             nome_up = nome.upper()
+            infantil_keywords = ["ADULT SWIM", "CARTOON", "KIDS", "GLOOB", "NICK", "RATIM", "TOONCAST", "ZOOMOO", "PREDIO AZUL", "RETRÔ"]
 
-            # Palavras-chave para identificar canais infantis (agora incluindo RETRÔ e KIDS)
-            infantil_keywords = [
-                "ADULT SWIM", "CARTOON", "KIDS", "GLOOB", "NICK",
-                "RATIM", "TOONCAST", "ZOOMOO", "PREDIO AZUL", "RETRÔ"
-            ]
-
-            # Aplica organização Infantil para os 3 servidores
             if serv_id in ["speed-1", "speed-2", "speed-3"]:
                 if any(k in nome_up for k in infantil_keywords):
                     final_category = f"{serv_label} - Infantil"
-
-                # Mantém HBO Max especificamente no S2
                 elif serv_id == "speed-2" and "HBO MAX" in nome_up:
                     final_category = f"{serv_label} - HBO Max"
 
@@ -148,19 +135,15 @@ def get_canais():
         all_tasks = []
         with ThreadPoolExecutor(max_workers=15) as executor:
             for serv in servidores:
-                # Prioridade 1: Pastas de Categorias do Site
                 cats = get_real_categories(session, serv['id'])
                 for cat in cats:
                     base_cat = cat['url'].split('?')[0]
                     url_cat = f"{base_cat}?thema=1&server={serv['id']}&pagina=1"
-                    cat_label = f"{serv['label']} - {cat['name']}"
-                    all_tasks.append(executor.submit(fetch_page, session, url_cat, serv['label'], serv['id'], current_host, cat_label))
+                    all_tasks.append(executor.submit(fetch_page, session, url_cat, serv['label'], serv['id'], current_host, f"{serv['label']} - {cat['name']}"))
 
-                # Prioridade 2: Lista Geral (Varredura de todas as páginas)
                 for page in range(1, serv['max_p'] + 1):
                     url = f"{BASE_URL}/canais/?thema=1&server={serv['id']}&pagina={page}"
-                    cat_label = f"{serv['label']} - Geral"
-                    all_tasks.append(executor.submit(fetch_page, session, url, serv['label'], serv['id'], current_host, cat_label))
+                    all_tasks.append(executor.submit(fetch_page, session, url, serv['label'], serv['id'], current_host, f"{serv['label']} - Geral"))
 
         results = []
         for task in all_tasks:
@@ -169,7 +152,6 @@ def get_canais():
                 if res: results.extend(res)
             except: continue
 
-        # Ordenação especial para deixar o grupo "Geral" por último
         results.sort(key=lambda x: (x['category'].replace('Geral', 'ZZZ'), x['nome']))
 
         links_vistos = set()
