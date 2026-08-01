@@ -14,7 +14,7 @@ BASE_URL = 'https://app.pobreflix2.site'
 
 @app.route('/')
 def home():
-    return jsonify({"status": "online", "message": "API Ycine Master - Versão 26 Categoria Priority"})
+    return jsonify({"status": "online", "message": "API Ycine Master - Versão 27 Turbo Stable"})
 
 # ROTA DE REPRODUÇÃO - SISTEMA DE PROXY
 @app.route('/stream')
@@ -62,10 +62,10 @@ def get_stream():
     except Exception as e:
         return f"Erro fatal: {str(e)}", 500
 
-def fetch_page(session, url, serv_label, serv_id, host, category_name="Geral"):
+def fetch_page(session, url, serv_id, host, category_name="Geral"):
     canais_da_pagina = []
     try:
-        r = session.get(url, timeout=25)
+        r = session.get(url, timeout=20)
         if r.status_code != 200: return []
 
         soup = BeautifulSoup(r.text, 'html.parser')
@@ -101,15 +101,15 @@ def get_real_categories(session, server_id):
     found_categories = []
     try:
         url = f"{BASE_URL}/canais/categorias/?thema=1&server={server_id}"
-        r = session.get(url, timeout=15)
+        r = session.get(url, timeout=12)
         soup = BeautifulSoup(r.text, 'html.parser')
         for a in soup.find_all('a', href=True):
-            # Captura links de categorias com e sem barra final
-            if '/canais/categorias/' in a['href'] or '/canais/categorias?' in a['href']:
+            href = a['href']
+            # Filtra apenas categorias reais que possuem ID numérico
+            if '/canais/categorias/' in href and any(part.isdigit() for part in href.split('/')):
                 name = a.get_text(strip=True)
-                href = a['href']
                 full_url = href if href.startswith('http') else f"{BASE_URL}{href}"
-                if name and not any(c['name'] == name for c in found_categories):
+                if name and name.lower() not in ['próximo', 'anterior'] and not any(c['name'] == name for c in found_categories):
                     found_categories.append({"name": name, "url": full_url})
     except:
         pass
@@ -129,24 +129,23 @@ def get_canais():
         ]
 
         all_tasks = []
-        with ThreadPoolExecutor(max_workers=20) as executor:
-            # PASSO 1: Capturar CATEGORIAS primeiro (Garante que Infantil e HBO Max tenham seus grupos)
+        # Aumentado workers para 30 para ser mais rápido e evitar timeout do Railway
+        with ThreadPoolExecutor(max_workers=30) as executor:
+            # PASSO 1: CATEGORIAS (Foca na página 1 para ser rápido e pegar o essencial como Infantil e HBO)
             for serv in servidores:
                 cats = get_real_categories(session, serv['id'])
                 for cat in cats:
                     base_cat = cat['url'].split('?')[0]
-                    # Varre até 2 páginas por categoria para não perder nada
-                    for p in range(1, 3):
-                        url_cat = f"{base_cat}?thema=1&server={serv['id']}&pagina={p}"
-                        cat_label = f"{serv['label']} - {cat['name']}"
-                        all_tasks.append(executor.submit(fetch_page, session, url_cat, serv['label'], serv['id'], current_host, cat_label))
+                    url_cat = f"{base_cat}?thema=1&server={serv['id']}&pagina=1"
+                    cat_label = f"{serv['label']} - {cat['name']}"
+                    all_tasks.append(executor.submit(fetch_page, session, url_cat, serv['id'], current_host, cat_label))
 
-            # PASSO 2: Capturar GERAL depois (Para pegar canais que não estão em categorias)
+            # PASSO 2: GERAL (Varredura completa por páginas)
             for serv in servidores:
                 for page in range(1, serv['max_p'] + 1):
                     url = f"{BASE_URL}/canais/?thema=1&server={serv['id']}&pagina={page}"
                     cat_label = f"{serv['label']} - Geral"
-                    all_tasks.append(executor.submit(fetch_page, session, url, serv['label'], serv['id'], current_host, cat_label))
+                    all_tasks.append(executor.submit(fetch_page, session, url, serv['id'], current_host, cat_label))
 
         results = []
         for task in all_tasks:
@@ -155,14 +154,13 @@ def get_canais():
                 if res: results.extend(res)
             except: continue
 
-        # Ordenação inteligente
+        # Ordenação inteligente (S1 primeiro, Categorias em ordem alfabética)
         results.sort(key=lambda x: (x['category'], x['nome']))
 
         links_vistos = set()
         m3u_content = "#EXTM3U\n"
         count = 0
         for canal in results:
-            # O link_visto garante que se ele já entrou no grupo "Infantil", não entrará no "Geral"
             if canal['chave'] not in links_vistos:
                 links_vistos.add(canal['chave'])
                 logo_attr = f' tvg-logo="{canal["logo"]}"' if canal["logo"] else ""
@@ -172,6 +170,7 @@ def get_canais():
         m3u_content += f"\n# TOTAL CAPTURADO: {count}\n"
         return Response(m3u_content, mimetype='text/plain')
     except Exception as e:
+        # Se der erro, mostra qual foi para podermos depurar
         return f"Erro fatal: {str(e)}", 500
 
 if __name__ == "__main__":
