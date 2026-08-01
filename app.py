@@ -4,7 +4,7 @@ import requests
 from bs4 import BeautifulSoup
 import time
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, quote
 
 app = Flask(__name__)
 
@@ -14,29 +14,30 @@ BASE_URL = 'https://app.pobreflix2.site'
 
 @app.route('/')
 def home():
-    return jsonify({"status": "online", "message": "API Ycine Master - Versão 23 Full Proxy"})
+    return jsonify({"status": "online", "message": "API Ycine Master - Versão 24 Corrigida"})
 
-# ROTA DE REPRODUÇÃO - SISTEMA DE PROXY PARA BYPASS DE 404
+# ROTA DE REPRODUÇÃO - SISTEMA DE PROXY COM CORREÇÃO DE URL (ERRO 400)
 @app.route('/stream')
 def get_stream():
     url_base_canal = request.args.get('url')
     if not url_base_canal: return "URL ausente", 400
 
     try:
-        # 1. Extração de ID e Servidor para montar o link .m3u8 alvo
+        # Extração de ID e Servidor
         parsed = urlparse(url_base_canal)
         path_parts = parsed.path.strip('/').split('/')
         qs = parse_qs(parsed.query)
-        server_id = qs.get('server', [''])[0]
+
+        # Recupera o server_id da URL interna ou dos argumentos da requisição (Resiliência contra erro 400)
+        server_id = qs.get('server', [''])[0] or request.args.get('server', '')
         channel_id = path_parts[-1] if path_parts else ''
 
         if not (server_id and channel_id.isdigit()):
-            return "ID de canal inválido", 400
+            return f"Erro: Servidor({server_id}) ou ID({channel_id}) inválido", 400
 
         target_m3u8 = f"https://speed.megafilmeshd9.com/midia/{server_id}/{channel_id}.m3u8"
 
-        # 2. Faz a requisição ao servidor de vídeo USANDO OS HEADERS CORRETOS
-        # O Referer deve ser a página do canal original
+        # Headers de autorização
         headers = {
             'User-Agent': REAL_UA,
             'Referer': url_base_canal,
@@ -46,18 +47,15 @@ def get_stream():
         r = requests.get(target_m3u8, headers=headers, timeout=10)
 
         if r.status_code != 200:
-            return f"Erro no servidor de vídeo: {r.status_code}", 404
+            return f"Erro no sinal original: {r.status_code}", 404
 
-        # 3. REESCRITA DA PLAYLIST (Essencial para TiviMate)
-        # O .m3u8 contém links relativos. Vamos transformá-los em absolutos.
+        # REESCRITA DA PLAYLIST PARA ABSOLUTO (TS CHUNKS)
         playlist_lines = r.text.splitlines()
         new_playlist = []
-        # URL Base do servidor de vídeo para os chunks (.ts)
         video_base_url = target_m3u8.rsplit('/', 1)[0] + "/"
 
         for line in playlist_lines:
             if line and not line.startswith('#'):
-                # Se a linha não começar com http, ela é um link relativo
                 if not line.startswith('http'):
                     new_playlist.append(video_base_url + line)
                 else:
@@ -65,7 +63,6 @@ def get_stream():
             else:
                 new_playlist.append(line)
 
-        # Retorna a playlist modificada diretamente para o player
         return Response('\n'.join(new_playlist), mimetype='application/vnd.apple.mpegurl')
 
     except Exception as e:
@@ -91,15 +88,14 @@ def fetch_page(session, url, serv_label, serv_id, host, category_name="Geral"):
             if not nome or any(menu in nome.lower() for menu in ['sair', 'minha conta', 'editar']):
                 continue
 
-            full_url = href if href.startswith('http') else f"{BASE_URL}{href}"
+            # Extrai o ID do canal da URL original
+            canal_id = href.split('?')[0].rstrip('/').split('/')[-1]
 
-            # Limpa a URL e garante o servidor
-            base_url_clean = full_url.split('?')[0].rstrip('/')
-            canal_id = base_url_clean.split('/')[-1]
-            final_canal_url = f"{BASE_URL}/canais/{canal_id}?thema=1&server={serv_id}"
+            # Monta a URL que o nosso /stream vai processar (Encodada para evitar erro 400)
+            internal_url = f"{BASE_URL}/canais/{canal_id}?thema=1&server={serv_id}"
 
-            # Link do proxy para o M3U
-            link_proxy = f"https://{host}/stream?url={final_canal_url}"
+            # Link do proxy protegido com quote()
+            link_proxy = f"https://{host}/stream?url={quote(internal_url)}&server={serv_id}"
 
             canais_da_pagina.append({
                 "nome": f"{nome} ({serv_label})",
@@ -144,10 +140,12 @@ def get_canais():
         all_tasks = []
         with ThreadPoolExecutor(max_workers=15) as executor:
             for serv in servidores:
+                # Páginas gerais
                 for page in range(1, serv['max_p'] + 1):
                     url = f"{BASE_URL}/canais/?thema=1&server={serv['id']}&pagina={page}"
                     all_tasks.append(executor.submit(fetch_page, session, url, serv['label'], serv['id'], current_host, "Geral"))
 
+                # Categorias
                 cats = get_real_categories(session, serv['id'])
                 for cat in cats:
                     base_cat = cat['url'].split('?')[0]
