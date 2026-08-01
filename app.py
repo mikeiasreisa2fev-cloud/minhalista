@@ -8,65 +8,68 @@ from urllib.parse import urlparse, parse_qs
 
 app = Flask(__name__)
 
-# User-Agent e Referer oficiais para autorizar o stream
+# Configurações de Identidade Real
 REAL_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
-REAL_REF = 'https://app.pobreflix2.site/'
-
-HEADERS = {
-    'User-Agent': REAL_UA,
-    'Accept': '*/*',
-    'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
-    'Referer': REAL_REF,
-    'Origin': 'https://app.pobreflix2.site',
-    'Connection': 'keep-alive'
-}
+BASE_URL = 'https://app.pobreflix2.site'
 
 @app.route('/')
 def home():
-    return jsonify({"status": "online", "message": "API Ycine Master - Versão 22 TiviMate Fix"})
+    return jsonify({"status": "online", "message": "API Ycine Master - Versão 23 Full Proxy"})
 
-# ROTA DE REPRODUÇÃO - Otimizada para TiviMate
+# ROTA DE REPRODUÇÃO - SISTEMA DE PROXY PARA BYPASS DE 404
 @app.route('/stream')
 def get_stream():
     url_base_canal = request.args.get('url')
-    if not url_base_canal:
-        return "URL ausente", 400
+    if not url_base_canal: return "URL ausente", 400
 
     try:
-        # Extração rápida de ID e Servidor para evitar o 404 por demora
+        # 1. Extração de ID e Servidor para montar o link .m3u8 alvo
         parsed = urlparse(url_base_canal)
         path_parts = parsed.path.strip('/').split('/')
         qs = parse_qs(parsed.query)
         server_id = qs.get('server', [''])[0]
         channel_id = path_parts[-1] if path_parts else ''
 
-        # Lógica direta (Padrão verificado nos códigos fonte do S1, S2 e S3)
-        if server_id and channel_id.isdigit():
-            link_final = f"https://speed.megafilmeshd9.com/midia/{server_id}/{channel_id}.m3u8"
-            return redirect(link_final)
+        if not (server_id and channel_id.isdigit()):
+            return "ID de canal inválido", 400
 
-        # Fallback: Scraper detalhado se a lógica acima falhar
-        session = requests.Session()
-        session.headers.update(HEADERS)
-        r = session.get(url_base_canal, timeout=10)
-        soup = BeautifulSoup(r.text, 'html.parser')
+        target_m3u8 = f"https://speed.megafilmeshd9.com/midia/{server_id}/{channel_id}.m3u8"
 
-        play_div = soup.find(id='iptv-play-button')
-        link_final = play_div.get('data-url') if play_div and play_div.get('data-url') else None
+        # 2. Faz a requisição ao servidor de vídeo USANDO OS HEADERS CORRETOS
+        # O Referer deve ser a página do canal original
+        headers = {
+            'User-Agent': REAL_UA,
+            'Referer': url_base_canal,
+            'Origin': BASE_URL
+        }
 
-        if not link_final:
-            botao = soup.find('a', class_='iptv-player-gratis')
-            link_final = botao['href'] if botao and botao.get('href') else None
+        r = requests.get(target_m3u8, headers=headers, timeout=10)
 
-        if link_final:
-            if link_final.startswith('/'):
-                link_final = f"https://app.pobreflix2.site{link_final}"
-            return redirect(link_final)
+        if r.status_code != 200:
+            return f"Erro no servidor de vídeo: {r.status_code}", 404
 
-    except:
-        pass
+        # 3. REESCRITA DA PLAYLIST (Essencial para TiviMate)
+        # O .m3u8 contém links relativos. Vamos transformá-los em absolutos.
+        playlist_lines = r.text.splitlines()
+        new_playlist = []
+        # URL Base do servidor de vídeo para os chunks (.ts)
+        video_base_url = target_m3u8.rsplit('/', 1)[0] + "/"
 
-    return "Sinal indisponível no momento", 404
+        for line in playlist_lines:
+            if line and not line.startswith('#'):
+                # Se a linha não começar com http, ela é um link relativo
+                if not line.startswith('http'):
+                    new_playlist.append(video_base_url + line)
+                else:
+                    new_playlist.append(line)
+            else:
+                new_playlist.append(line)
+
+        # Retorna a playlist modificada diretamente para o player
+        return Response('\n'.join(new_playlist), mimetype='application/vnd.apple.mpegurl')
+
+    except Exception as e:
+        return f"Erro fatal: {str(e)}", 500
 
 def fetch_page(session, url, serv_label, serv_id, host, category_name="Geral"):
     canais_da_pagina = []
@@ -76,7 +79,6 @@ def fetch_page(session, url, serv_label, serv_id, host, category_name="Geral"):
 
         soup = BeautifulSoup(r.text, 'html.parser')
         items = soup.find_all('a', class_='iptv-cat-item')
-        menu_items = ['início', 'filmes', 'séries', 'minha conta', 'sair', 'contato', 'termos', 'editar conta']
 
         for a in items:
             href = a['href']
@@ -86,23 +88,25 @@ def fetch_page(session, url, serv_label, serv_id, host, category_name="Geral"):
             img = a.find('img')
             if img: logo = img.get('src') or img.get('data-src') or ""
 
-            if not nome or any(menu == nome.lower() for menu in menu_items):
+            if not nome or any(menu in nome.lower() for menu in ['sair', 'minha conta', 'editar']):
                 continue
 
-            full_url = href if href.startswith('http') else f"https://app.pobreflix2.site{href}"
+            full_url = href if href.startswith('http') else f"{BASE_URL}{href}"
 
-            # Limpa e reconstrói a URL para evitar parâmetros duplicados
-            base_url_clean = full_url.split('?')[0]
-            full_url = f"{base_url_clean}?thema=1&server={serv_id}"
+            # Limpa a URL e garante o servidor
+            base_url_clean = full_url.split('?')[0].rstrip('/')
+            canal_id = base_url_clean.split('/')[-1]
+            final_canal_url = f"{BASE_URL}/canais/{canal_id}?thema=1&server={serv_id}"
 
-            link_proxy = f"https://{host}/stream?url={full_url}"
+            # Link do proxy para o M3U
+            link_proxy = f"https://{host}/stream?url={final_canal_url}"
 
             canais_da_pagina.append({
                 "nome": f"{nome} ({serv_label})",
                 "url": link_proxy,
                 "logo": logo,
                 "category": category_name,
-                "chave": f"{serv_id}-{base_url_clean.split('/')[-1]}"
+                "chave": f"{serv_id}-{canal_id}"
             })
     except:
         pass
@@ -111,14 +115,14 @@ def fetch_page(session, url, serv_label, serv_id, host, category_name="Geral"):
 def get_real_categories(session, server_id):
     found_categories = []
     try:
-        url = f"https://app.pobreflix2.site/canais/categorias/?thema=1&server={server_id}"
+        url = f"{BASE_URL}/canais/categorias/?thema=1&server={server_id}"
         r = session.get(url, timeout=15)
         soup = BeautifulSoup(r.text, 'html.parser')
         for a in soup.find_all('a', href=True):
             if '/canais/categorias/' in a['href']:
                 name = a.get_text(strip=True)
                 href = a['href']
-                full_url = href if href.startswith('http') else f"https://app.pobreflix2.site{href}"
+                full_url = href if href.startswith('http') else f"{BASE_URL}{href}"
                 if name: found_categories.append({"name": name, "url": full_url})
     except:
         pass
@@ -129,7 +133,7 @@ def get_canais():
     try:
         current_host = request.host
         session = requests.Session()
-        session.headers.update(HEADERS)
+        session.headers.update({'User-Agent': REAL_UA})
 
         servidores = [
             {"id": "speed-1", "label": "S1", "max_p": 59},
@@ -141,7 +145,7 @@ def get_canais():
         with ThreadPoolExecutor(max_workers=15) as executor:
             for serv in servidores:
                 for page in range(1, serv['max_p'] + 1):
-                    url = f"https://app.pobreflix2.site/canais/?thema=1&server={serv['id']}&pagina={page}"
+                    url = f"{BASE_URL}/canais/?thema=1&server={serv['id']}&pagina={page}"
                     all_tasks.append(executor.submit(fetch_page, session, url, serv['label'], serv['id'], current_host, "Geral"))
 
                 cats = get_real_categories(session, serv['id'])
@@ -166,9 +170,7 @@ def get_canais():
             if canal['chave'] not in links_vistos:
                 links_vistos.add(canal['chave'])
                 logo_attr = f' tvg-logo="{canal["logo"]}"' if canal["logo"] else ""
-                # O segredo para TiviMate: passar Referer e User-Agent via pipe (|)
-                tivimate_suffix = f"|User-Agent={REAL_UA}&Referer={REAL_REF}"
-                m3u_content += f'#EXTINF:-1{logo_attr} group-title="{canal["category"]}",{canal["nome"]}\n{canal["url"]}{tivimate_suffix}\n'
+                m3u_content += f'#EXTINF:-1{logo_attr} group-title="{canal["category"]}",{canal["nome"]}\n{canal["url"]}\n'
                 count += 1
 
         m3u_content += f"\n# TOTAL CAPTURADO: {count}\n"
