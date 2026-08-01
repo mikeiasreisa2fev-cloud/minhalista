@@ -8,15 +8,15 @@ from urllib.parse import urlparse, parse_qs, quote
 
 app = Flask(__name__)
 
-# Configurações de Identidade Real
+# Configurações de Identidade Real para evitar bloqueios
 REAL_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
 BASE_URL = 'https://app.pobreflix2.site'
 
 @app.route('/')
 def home():
-    return jsonify({"status": "online", "message": "API Ycine Master - Versão 25 Identificação de Grupos"})
+    return jsonify({"status": "online", "message": "API Ycine Master - Versão 33 Organização Total S1/S2/S3"})
 
-# ROTA DE REPRODUÇÃO - SISTEMA DE PROXY COM CORREÇÃO DE URL
+# ROTA DE REPRODUÇÃO - SISTEMA DE PROXY PARA BYPASS DE 404
 @app.route('/stream')
 def get_stream():
     url_base_canal = request.args.get('url')
@@ -26,7 +26,6 @@ def get_stream():
         parsed = urlparse(url_base_canal)
         path_parts = parsed.path.strip('/').split('/')
         qs = parse_qs(parsed.query)
-
         server_id = qs.get('server', [''])[0] or request.args.get('server', '')
         channel_id = path_parts[-1] if path_parts else ''
 
@@ -42,7 +41,6 @@ def get_stream():
         }
 
         r = requests.get(target_m3u8, headers=headers, timeout=10)
-
         if r.status_code != 200:
             return f"Erro no sinal original: {r.status_code}", 404
 
@@ -88,11 +86,30 @@ def fetch_page(session, url, serv_label, serv_id, host, category_name="Geral"):
             internal_url = f"{BASE_URL}/canais/{canal_id}?thema=1&server={serv_id}"
             link_proxy = f"https://{host}/stream?url={quote(internal_url)}&server={serv_id}"
 
+            # --- LÓGICA DE ORGANIZAÇÃO MANUAL (S1, S2 e S3) ---
+            final_category = category_name
+            nome_up = nome.upper()
+
+            # Palavras-chave para identificar canais infantis (agora incluindo RETRÔ e KIDS)
+            infantil_keywords = [
+                "ADULT SWIM", "CARTOON", "KIDS", "GLOOB", "NICK",
+                "RATIM", "TOONCAST", "ZOOMOO", "PREDIO AZUL", "RETRÔ"
+            ]
+
+            # Aplica organização Infantil para os 3 servidores
+            if serv_id in ["speed-1", "speed-2", "speed-3"]:
+                if any(k in nome_up for k in infantil_keywords):
+                    final_category = f"{serv_label} - Infantil"
+
+                # Mantém HBO Max especificamente no S2
+                elif serv_id == "speed-2" and "HBO MAX" in nome_up:
+                    final_category = f"{serv_label} - HBO Max"
+
             canais_da_pagina.append({
-                "nome": nome, # Removido o (S1) do nome pois já estará no grupo
+                "nome": nome,
                 "url": link_proxy,
                 "logo": logo,
-                "category": category_name, # O nome do grupo agora vem pronto (Ex: S1 - Globo)
+                "category": final_category,
                 "chave": f"{serv_id}-{canal_id}"
             })
     except:
@@ -131,21 +148,19 @@ def get_canais():
         all_tasks = []
         with ThreadPoolExecutor(max_workers=15) as executor:
             for serv in servidores:
-                # Páginas gerais com prefixo do servidor no grupo
-                for page in range(1, serv['max_p'] + 1):
-                    url = f"{BASE_URL}/canais/?thema=1&server={serv['id']}&pagina={page}"
-                    # Identificando a categoria com o servidor
-                    cat_label = f"{serv['label']} - Geral"
-                    all_tasks.append(executor.submit(fetch_page, session, url, serv['label'], serv['id'], current_host, cat_label))
-
-                # Categorias com prefixo do servidor no grupo
+                # Prioridade 1: Pastas de Categorias do Site
                 cats = get_real_categories(session, serv['id'])
                 for cat in cats:
                     base_cat = cat['url'].split('?')[0]
                     url_cat = f"{base_cat}?thema=1&server={serv['id']}&pagina=1"
-                    # Identificando a categoria com o servidor (Ex: S1 - Premiere)
                     cat_label = f"{serv['label']} - {cat['name']}"
                     all_tasks.append(executor.submit(fetch_page, session, url_cat, serv['label'], serv['id'], current_host, cat_label))
+
+                # Prioridade 2: Lista Geral (Varredura de todas as páginas)
+                for page in range(1, serv['max_p'] + 1):
+                    url = f"{BASE_URL}/canais/?thema=1&server={serv['id']}&pagina={page}"
+                    cat_label = f"{serv['label']} - Geral"
+                    all_tasks.append(executor.submit(fetch_page, session, url, serv['label'], serv['id'], current_host, cat_label))
 
         results = []
         for task in all_tasks:
@@ -154,8 +169,8 @@ def get_canais():
                 if res: results.extend(res)
             except: continue
 
-        # Ordena para que os servidores fiquem agrupados (S1 primeiro, depois S2...)
-        results.sort(key=lambda x: (x['category'], x['nome']))
+        # Ordenação especial para deixar o grupo "Geral" por último
+        results.sort(key=lambda x: (x['category'].replace('Geral', 'ZZZ'), x['nome']))
 
         links_vistos = set()
         m3u_content = "#EXTM3U\n"
@@ -164,7 +179,6 @@ def get_canais():
             if canal['chave'] not in links_vistos:
                 links_vistos.add(canal['chave'])
                 logo_attr = f' tvg-logo="{canal["logo"]}"' if canal["logo"] else ""
-                # O category aqui já contém o prefixo "S1 - ", "S2 - ", etc.
                 m3u_content += f'#EXTINF:-1{logo_attr} group-title="{canal["category"]}",{canal["nome"]}\n{canal["url"]}\n'
                 count += 1
 
