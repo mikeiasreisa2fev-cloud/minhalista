@@ -8,17 +8,21 @@ from urllib.parse import urlparse, parse_qs
 
 app = Flask(__name__)
 
-# Configurações globais
+# Cabeçalhos de alto nível para evitar bloqueios nos Servidores 2 e 3
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Referer': 'https://app.pobreflix2.site/'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Referer': 'https://app.pobreflix2.site/',
+    'Connection': 'keep-alive',
+    'Upgrade-Insecure-Requests': '1'
 }
 
 @app.route('/')
 def home():
-    return jsonify({"status": "online", "message": "API Ycine Master - Versão 19 Final Estável"})
+    return jsonify({"status": "online", "message": "API Ycine Master - Versão 20 Deep Scraper"})
 
-# ROTA INTELIGENTE PARA REPRODUÇÃO
+# ROTA PARA REPRODUÇÃO - CORREÇÃO DEFINITIVA S2/S3
 @app.route('/stream')
 def get_stream():
     url_base_canal = request.args.get('url')
@@ -26,40 +30,60 @@ def get_stream():
         return "URL ausente", 400
 
     try:
-        # 1. TENTATIVA POR LÓGICA PREDITIVA (Rápida)
-        parsed = urlparse(url_base_canal)
-        path_parts = parsed.path.strip('/').split('/')
-        qs = parse_qs(parsed.query)
+        # 1. TENTATIVA POR SCRAPER REAL (Necessário para S2 e S3)
+        session = requests.Session()
+        # Simula uma navegação real vinda da home para validar a sessão
+        session.get("https://app.pobreflix2.site/", headers=HEADERS, timeout=5)
 
-        server_id = qs.get('server', [''])[0]
-        channel_id = path_parts[-1] if path_parts else ''
+        # Acessa a página do canal com Referer específico
+        canal_headers = HEADERS.copy()
+        canal_headers['Referer'] = 'https://app.pobreflix2.site/canais/'
 
-        if server_id and channel_id.isdigit():
-            link_direto = f"https://speed.megafilmeshd9.com/midia/{server_id}/{channel_id}.m3u8"
-            return redirect(link_direto)
+        r = session.get(url_base_canal, headers=canal_headers, timeout=12)
+        if r.status_code != 200:
+            # Fallback rápido se o site bloquear o scraper
+            return fallback_predictive(url_base_canal)
 
-        # 2. FALLBACK POR SCRAPER
-        r = requests.get(url_base_canal, headers=HEADERS, timeout=10)
         soup = BeautifulSoup(r.text, 'html.parser')
-
         link_final = None
+
+        # Busca no atributo data-url (Onde o S2 e S3 escondem o link conforme seu código-fonte)
         play_div = soup.find(id='iptv-play-button')
         if play_div and play_div.get('data-url'):
             link_final = play_div['data-url']
 
+        # Busca no botão Player Grátis (Fallback do scraper)
         if not link_final:
             botao = soup.find('a', class_='iptv-player-gratis')
             if botao and botao.get('href'):
                 link_final = botao['href']
 
+        # Se encontrou o link real, redireciona o player
         if link_final:
             if link_final.startswith('/'):
                 link_final = f"https://app.pobreflix2.site{link_final}"
             return redirect(link_final)
 
-        return "Não foi possível extrair o link deste canal", 404
+        # 2. SE O SCRAPER FALHAR, TENTA A LÓGICA PREDITIVA COMO ÚLTIMA CHANCE
+        return fallback_predictive(url_base_canal)
+
     except Exception as e:
         return f"Erro no servidor: {str(e)}", 500
+
+def fallback_predictive(url):
+    """Gera o link baseado no padrão m3u8 se o scraper falhar."""
+    try:
+        parsed = urlparse(url)
+        path_parts = parsed.path.strip('/').split('/')
+        qs = parse_qs(parsed.query)
+        server_id = qs.get('server', [''])[0]
+        channel_id = path_parts[-1] if path_parts else ''
+
+        if server_id and channel_id.isdigit():
+            return redirect(f"https://speed.megafilmeshd9.com/midia/{server_id}/{channel_id}.m3u8")
+    except:
+        pass
+    return "Não foi possível encontrar o sinal deste canal", 404
 
 def fetch_page(session, url, serv_label, serv_id, host, category_name="Geral"):
     canais_da_pagina = []
@@ -110,7 +134,6 @@ def get_real_categories(session, server_id):
             if '/canais/categorias/' in a['href']:
                 name = a.get_text(strip=True)
                 href = a['href']
-                # Correção da URL absoluta para a categoria
                 full_url = href if href.startswith('http') else f"https://app.pobreflix2.site{href}"
                 if name: found_categories.append({"name": name, "url": full_url})
     except:
@@ -131,15 +154,12 @@ def get_canais():
         ]
 
         all_tasks = []
-        # Reduzi workers para 15 para evitar bloqueios por excesso de requisições
         with ThreadPoolExecutor(max_workers=15) as executor:
             for serv in servidores:
-                # Páginas Gerais
                 for page in range(1, serv['max_p'] + 1):
                     url = f"https://app.pobreflix2.site/canais/?thema=1&server={serv['id']}&pagina={page}"
                     all_tasks.append(executor.submit(fetch_page, session, url, serv['label'], serv['id'], current_host, "Geral"))
 
-                # Páginas de Categorias
                 cats = get_real_categories(session, serv['id'])
                 for cat in cats:
                     base_cat = cat['url'].split('?')[0]
